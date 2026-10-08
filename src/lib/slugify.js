@@ -1,3 +1,6 @@
+/**
+ * Converts a string into a URL-safe slug.
+ */
 export function slugify(text) {
   return text
     .toString()

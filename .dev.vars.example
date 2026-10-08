@@ -1,0 +1,6 @@
+# Local development secrets — DO NOT commit real values
+# Copy this file to .dev.vars and fill in your secrets
+# wrangler dev reads .dev.vars automatically
+
+JWT_SECRET=dev-jwt-secret-change-in-production-please-use-a-long-random-string
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key-here

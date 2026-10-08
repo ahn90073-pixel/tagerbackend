@@ -1,44 +1,39 @@
-import jwt from 'jsonwebtoken';
-import { config } from '../config/env.js';
-import { UnauthorizedError, ForbiddenError } from '../utils/AppError.js';
+import { verifyToken } from '../lib/jwt.js';
+import { errorResponse } from '../lib/response.js';
 
 /**
- * Extracts and verifies the JWT from the Authorization header.
- * Attaches `req.user` with { id, email, isPlatformAdmin }.
+ * JWT authentication middleware.
+ * Extracts the Bearer token from the Authorization header, verifies it,
+ * and attaches the user payload to c.set('user', ...).
  */
-export function authenticate(req, _res, next) {
+export async function authMiddleware(c, next) {
+  const header = c.req.header('Authorization');
+  if (!header || !header.startsWith('Bearer ')) {
+    return errorResponse('Authentication token is required', 401);
+  }
+
+  const token = header.split(' ')[1];
   try {
-    const header = req.headers.authorization;
-    if (!header || !header.startsWith('Bearer ')) {
-      throw new UnauthorizedError('Authentication token is required');
-    }
-
-    const token = header.split(' ')[1];
-    const payload = jwt.verify(token, config.jwt.secret);
-
-    req.user = {
+    const payload = await verifyToken(token, c.env.JWT_SECRET);
+    c.set('user', {
       id: payload.sub,
       email: payload.email,
-      isPlatformAdmin: payload.isPlatformAdmin || false,
-    };
-
-    next();
-  } catch (err) {
-    if (err instanceof UnauthorizedError) {
-      return next(err);
-    }
-    next(new UnauthorizedError('Invalid or expired token'));
+      is_platform_admin: payload.is_platform_admin || false,
+    });
+    await next();
+  } catch {
+    return errorResponse('Invalid or expired token', 401);
   }
 }
 
 /**
  * Requires the authenticated user to be a platform admin.
+ * Must be used after authMiddleware.
  */
-export function requirePlatformAdmin(req, _res, next) {
-  if (!req.user?.isPlatformAdmin) {
-    return next(new ForbiddenError('Platform admin access required'));
+export async function requireAdmin(c, next) {
+  const user = c.get('user');
+  if (!user?.is_platform_admin) {
+    return errorResponse('Platform admin access required', 403);
   }
-  next();
+  await next();
 }
-
-
