@@ -13,17 +13,21 @@ export async function authMiddleware(c, next) {
   }
 
   const token = header.split(' ')[1];
+  let payload;
   try {
-    const payload = await verifyToken(token, c.env.JWT_SECRET);
-    c.set('user', {
-      id: payload.sub,
-      email: payload.email,
-      is_platform_admin: payload.is_platform_admin || false,
-    });
-    await next();
+    payload = await verifyToken(token, c.env.JWT_SECRET);
   } catch {
     return errorResponse('Invalid or expired token', 401);
   }
+
+  c.set('user', {
+    id: payload.sub,
+    email: payload.email,
+    is_platform_admin: payload.is_platform_admin || false,
+  });
+  // Do not catch errors from route handlers here; database/application errors
+  // must reach the global error handler instead of masquerading as JWT failures.
+  await next();
 }
 
 /**
