@@ -54,8 +54,10 @@ jobs:
           command: deploy
           secrets: |
             DATABASE_URL
+            JWT_SECRET
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
 
       - name: Verify deployed Worker health
         run: curl --fail --silent --show-error --retry 5 --retry-delay 5 https://tagerbackend.ahn90073.workers.dev/health
