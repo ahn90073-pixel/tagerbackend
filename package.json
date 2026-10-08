@@ -9,7 +9,7 @@
     "dev": "wrangler dev",
     "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true});require('fs').writeFileSync('dist/.placeholder','');console.log('Build complete')\"",
     "deploy": "wrangler deploy",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"

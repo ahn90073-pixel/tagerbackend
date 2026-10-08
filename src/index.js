@@ -4,6 +4,7 @@ import { logger } from 'hono/logger';
 import authRoutes from './routes/auth.js';
 import companyRoutes from './routes/companies.js';
 import productRoutes from './routes/products.js';
+import storefrontRoutes from './routes/storefront.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 
 const app = new Hono();
@@ -25,6 +26,7 @@ app.get('/health', (c) => {
 app.route('/api/auth', authRoutes);
 app.route('/api/companies', companyRoutes);
 app.route('/api/companies', productRoutes);
+app.route('/api/storefront', storefrontRoutes);
 
 // ---- 404 + error handler (must be last) ----
 app.notFound(notFound);
