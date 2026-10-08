@@ -35,13 +35,14 @@ jobs:
       - name: Build Worker
         run: npm run build
 
-      - name: Apply Neon schema migration
+      - name: Apply Neon schema migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           sudo apt-get update
           sudo apt-get install --yes postgresql-client
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0001_initial.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0002_tenant_schemas.sql
 
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v4

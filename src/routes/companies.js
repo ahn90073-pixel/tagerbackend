@@ -21,18 +21,15 @@ companies.post('/', authMiddleware, validate(createCompanySchema), async (c) => 
   const user = c.get('user');
   const db = createDb(c.env);
   try {
-    const [company] = await db`
-      WITH new_company AS (
-        INSERT INTO companies (slug, legal_name, display_name, email)
-        VALUES (${body.slug}, ${body.legalName}, ${body.displayName}, ${body.email || null})
-        RETURNING *
-      ), new_membership AS (
-        INSERT INTO company_members (company_id, user_id, role, is_active)
-        SELECT id, ${user.id}, 'owner', TRUE FROM new_company
-        RETURNING company_id
-      )
-      SELECT new_company.* FROM new_company
+    const [createdCompany] = await db`
+      SELECT public.create_company_with_owner(
+        ${body.slug}, ${body.legalName}, ${body.displayName}, ${user.id}, ${body.email || null}
+      ) AS company_id
     `;
+    const [company] = await db`
+      SELECT * FROM public.companies WHERE id = ${createdCompany.company_id} LIMIT 1
+    `;
+    if (!company) throw new Error('Company creation completed without returning the company record.');
     return jsonResponse(created(company, 'Company created successfully'), 201);
   } catch (error) {
     if (error.code === '23505') return errorResponse('A company with this slug already exists', 409);

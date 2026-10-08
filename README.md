@@ -31,7 +31,7 @@ The deployed Worker name is `tagerbackend`; health check: `/health`.
 
 ## Automatic deployment with GitHub Actions
 
-`.github/workflows/deploy-cloudflare-worker.yml` deploys this Worker after each push or merge to `main`. It installs dependencies, builds the Worker, applies the Neon schema migration, deploys using Cloudflare's official Wrangler Action, then checks the public `/health` endpoint. Manual dispatch is also available, but the workflow only deploys when the selected ref is `main`.
+`.github/workflows/deploy-cloudflare-worker.yml` deploys this Worker after each push or merge to `main`. It installs dependencies, builds the Worker, applies the Neon schema migrations, deploys using Cloudflare's official Wrangler Action, then checks the public `/health` endpoint. Manual dispatch is also available, but the workflow only deploys when the selected ref is `main`.
 
 Before enabling the workflow, add these repository **Actions secrets** in GitHub (`Settings → Secrets and variables → Actions`):
 
@@ -41,7 +41,7 @@ Before enabling the workflow, add these repository **Actions secrets** in GitHub
 | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account ID hosting the `tagerbackend` Worker. |
 | `DATABASE_URL` | The Neon PostgreSQL connection string. The workflow sets this as a Cloudflare Worker secret on each deployment. |
 
-GitHub Actions passes the masked `DATABASE_URL` secret to `psql` to apply `migrations/0001_initial.sql` before deployment, then to Wrangler to create or update the Worker runtime secret with the same name. The migration is idempotent and does not drop existing tables or records. `JWT_SECRET` remains configured on the Worker and is not changed by this workflow. Never place connection strings or Cloudflare tokens in committed workflow files.
+GitHub Actions passes the masked `DATABASE_URL` secret to `psql` to apply `migrations/0001_initial.sql` and `migrations/0002_tenant_schemas.sql` before deployment, then to Wrangler to create or update the Worker runtime secret with the same name. The migrations are idempotent and do not drop existing tables or records. `0002_tenant_schemas.sql` backfills existing companies and provisions a safe `tenant_<company-slug>_<id>` PostgreSQL schema with company-filtered `categories` and `products` views; new companies receive the same namespace atomically with their owner membership. Canonical records remain in the existing `public` tables and continue to be scoped by `company_id`. `JWT_SECRET` remains configured on the Worker and is not changed by this workflow. Never place connection strings or Cloudflare tokens in committed workflow files.
 
 > Existing users and records remain untouched in the old database but are not visible to this Neon-backed API. If those records are needed, migrate them to Neon before switching traffic. Do not delete the old database as part of this code change.
 
