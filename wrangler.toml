@@ -2,3 +2,6 @@ name = "tagerbackend"
 main = "src/index.js"
 compatibility_date = "2026-10-08"
 compatibility_flags = ["nodejs_compat"]
+
+[secrets]
+required = ["DATABASE_URL", "JWT_SECRET"]

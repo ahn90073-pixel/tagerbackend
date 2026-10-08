@@ -16,7 +16,10 @@ export async function authMiddleware(c, next) {
   let payload;
   try {
     payload = await verifyToken(token, c.env.JWT_SECRET);
-  } catch {
+  } catch (error) {
+    if (error?.code === 'JWT_SECRET_MISSING') {
+      return errorResponse('Authentication service is temporarily unavailable.', 503);
+    }
     return errorResponse('Invalid or expired token', 401);
   }
 
