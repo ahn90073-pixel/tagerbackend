@@ -1,0 +1,7 @@
+{
+  "template": "node",
+  "build": {
+    "command": "npm run build",
+    "outputDir": "dist"
+  }
+}
