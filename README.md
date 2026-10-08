@@ -29,6 +29,19 @@ Multi-tenant marketplace API built with Hono on Cloudflare Workers. **All applic
 
 The deployed Worker name is `tagerbackend`; health check: `/health`.
 
+## Automatic deployment with GitHub Actions
+
+`.github/workflows/deploy-cloudflare-worker.yml` deploys this Worker after each push or merge to `main`. It installs the locked dependencies, builds the Worker, deploys using Cloudflare's official Wrangler Action, then checks the public `/health` endpoint. Manual dispatch is also available, but the workflow only deploys when the selected ref is `main`.
+
+Before enabling the workflow, add these repository **Actions secrets** in GitHub (`Settings → Secrets and variables → Actions`):
+
+| Secret | Value |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | A Cloudflare API token scoped to the target account with Workers Scripts edit permission. |
+| `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account ID hosting the `tagerbackend` Worker. |
+
+The Worker runtime secret `DATABASE_URL` is separate from GitHub Actions secrets. Keep it configured on the Cloudflare Worker; this workflow does not copy, print, or overwrite its value. No database URL or Cloudflare token belongs in the workflow file.
+
 > Existing users and records remain untouched in the old database but are not visible to this Neon-backed API. If those records are needed, migrate them to Neon before switching traffic. Do not delete the old database as part of this code change.
 
 ## API routes
