@@ -39,8 +39,9 @@ Before enabling the workflow, add these repository **Actions secrets** in GitHub
 |---|---|
 | `CLOUDFLARE_API_TOKEN` | A Cloudflare API token scoped to the target account with Workers Scripts edit permission. |
 | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account ID hosting the `tagerbackend` Worker. |
+| `DATABASE_URL` | The Neon PostgreSQL connection string. The workflow sets this as a Cloudflare Worker secret on each deployment. |
 
-The Worker runtime secret `DATABASE_URL` is separate from GitHub Actions secrets. Keep it configured on the Cloudflare Worker; this workflow does not copy, print, or overwrite its value. No database URL or Cloudflare token belongs in the workflow file.
+GitHub Actions passes the masked `DATABASE_URL` secret to Wrangler, which creates or updates the Worker runtime secret with the same name. `JWT_SECRET` remains configured on the Worker and is not changed by this workflow. Never place connection strings or Cloudflare tokens in committed workflow files.
 
 > Existing users and records remain untouched in the old database but are not visible to this Neon-backed API. If those records are needed, migrate them to Neon before switching traffic. Do not delete the old database as part of this code change.
 
