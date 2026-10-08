@@ -37,7 +37,7 @@ auth.post('/register', validate(registerSchema), async (c) => {
     return jsonResponse(created({ user, token }, 'Account created successfully'), 201);
   } catch (error) {
     if (error.code === '23505') {
-      return errorResponse(error.constraint?.includes('phone') ? 'A user with this phone already exists' : 'A user with this email already exists', 409);
+      return errorResponse(String(error.constraint ?? '').includes('phone') ? 'A user with this phone already exists' : 'A user with this email already exists', 409);
     }
     throw error;
   }
