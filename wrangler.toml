@@ -1,12 +1,4 @@
-name = "souq-online-api"
+name = "tagerbackend"
 main = "src/index.js"
-compatibility_date = "2024-09-25"
+compatibility_date = "2026-10-08"
 compatibility_flags = ["nodejs_compat"]
-
-[vars]
-SUPABASE_URL = "https://muyuukrqasdqwrjutlgy.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im11eXV1a3JxYXNkcXdyanV0bGd5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE0MTU2NDYsImV4cCI6MjEwNjk5MTY0Nn0.xrxBHUgbjy3HgP7BoKEpE8YbHexfZH-YAyw1DHsLJD8"
-
-# Set these as secrets with: wrangler secret put JWT_SECRET
-# wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-# Do NOT put real secret values in this file — use wrangler secret put.

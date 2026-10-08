@@ -1,7 +1,7 @@
 {
   "name": "souq-online-workers",
   "version": "1.0.0",
-  "description": "Multi-tenant marketplace API on Cloudflare Workers (سوق اون لين) — Hono + Supabase",
+  "description": "Multi-tenant marketplace API on Cloudflare Workers (سوق اون لين) — Hono + Neon PostgreSQL",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -15,9 +15,9 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.2.0",
     "bcryptjs": "^2.4.3",
-    "hono": "^4.6.0",
-    "@supabase/supabase-js": "^2.45.0"
+    "hono": "^4.6.0"
   },
   "devDependencies": {
     "wrangler": "^3.80.0"
