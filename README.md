@@ -8,14 +8,14 @@ Multi-tenant marketplace API built with Hono on Cloudflare Workers. **All applic
 2. Apply the initial schema once from the Neon SQL Editor, or with `psql`:
 
    ```bash
-   psql "$NEON_DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0001_initial.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0001_initial.sql
    ```
 
    The migration uses `CREATE ... IF NOT EXISTS` and does not drop or overwrite data. It is for a fresh Neon schema; it does not copy accounts or other records from the former Supabase database.
 3. Set the Worker secrets (do not put them in `wrangler.toml` or commit real values):
 
    ```bash
-   npx wrangler secret put NEON_DATABASE_URL
+   npx wrangler secret put DATABASE_URL
    npx wrangler secret put JWT_SECRET
    ```
 
@@ -75,7 +75,7 @@ npm run dev
 
 ## Configuration
 
-- `NEON_DATABASE_URL`: Neon PostgreSQL connection string, set as a Cloudflare Worker secret.
+- `DATABASE_URL`: Neon PostgreSQL connection string, set as a Cloudflare Worker secret.
 - `JWT_SECRET`: JWT signing secret, set as a Cloudflare Worker secret.
 
 No Supabase URL, key, client, SDK, or REST endpoint is used by the application.

@@ -1,4 +1,4 @@
 # Neon Postgres connection string. Keep real credentials out of source control.
-NEON_DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB?sslmode=require
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB?sslmode=require
 # Use a long random value locally; production is configured as a Worker secret.
 JWT_SECRET=replace-with-a-long-random-secret
