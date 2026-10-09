@@ -168,7 +168,9 @@ storefront.post('/checkout', async (c) => {
       'SELECT public.create_storefront_orders($1::jsonb) AS orders',
       [JSON.stringify(body)],
     );
-    return jsonResponse(createdResponse(row?.orders || []), 201);
+    const orders = row?.orders || [];
+    await notifyMerchantUsers(db, orders, body);
+    return jsonResponse(createdResponse(orders), 201);
   } catch (error) {
     if (error?.code === '22023') return errorResponse('بيانات الطلب أو التاجر غير صالحة.', 400);
     if (error?.code === 'P0001' || error?.code === '23503' || error?.code === '23514') {
@@ -177,6 +179,31 @@ storefront.post('/checkout', async (c) => {
     throw error;
   }
 });
+
+async function notifyMerchantUsers(db, orders, payload) {
+  const customerName = String(payload?.customer?.fullName || 'عميل جديد').trim();
+  for (const order of orders) {
+    const [company] = await db.query(
+      'SELECT tenant_schema_name FROM public.companies WHERE id = $1 AND status = \'active\' LIMIT 1',
+      [order.vendorId],
+    );
+    if (!company?.tenant_schema_name || !tenantSchemaPattern.test(company.tenant_schema_name)) continue;
+    const notificationTable = tenantTable(company.tenant_schema_name, 'notifications');
+    const data = JSON.stringify({
+      type: 'new_order',
+      orderId: order.orderId,
+      orderNumber: order.orderNumber,
+      vendorId: order.vendorId,
+    });
+    await db.query(
+      `INSERT INTO ${notificationTable} (company_id, user_id, title, body, data, sent_at)
+       SELECT $1, cm.user_id, $2, $3, $4::jsonb, now()
+       FROM public.company_members cm
+       WHERE cm.company_id = $1 AND cm.is_active = TRUE`,
+      [order.vendorId, 'طلب شراء جديد', `استلم متجرك طلبًا جديدًا ${order.orderNumber} من ${customerName}.`, data],
+    );
+  }
+}
 
 function createdResponse(orders) {
   return { success: true, message: 'تم تسجيل الطلب وإرساله إلى لوحة الإدارة لمراجعته.', data: { orders } };
