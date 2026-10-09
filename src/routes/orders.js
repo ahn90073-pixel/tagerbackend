@@ -26,7 +26,7 @@ orders.get('/:companyId/orders', authMiddleware, async (c) => {
   const itemTable = tenantTable(tenant.schema, 'order_items');
 
   const rows = await db.query(
-    `SELECT o.id, o.order_number, o.status, o.payment_method, o.payment_status,
+    `SELECT o.id, o.company_id, o.order_number, o.status, o.payment_method, o.payment_status,
        o.currency, o.subtotal, o.shipping_total, o.tax_total, o.grand_total,
        o.customer_note, o.placed_at, o.created_at, o.updated_at,
        c.full_name AS customer_name,
