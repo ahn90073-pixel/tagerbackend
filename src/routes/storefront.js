@@ -105,7 +105,7 @@ storefront.get('/products', async (c) => {
         p.price::numeric AS price, p.compare_at_price::numeric AS compare_at_price,
         p.currency, p.weight_grams, p.brand, p.seller_name, p.trusted_seller,
         p.free_shipping, p.is_featured, p.is_flash_deal, p.badge,
-        p.stock_quantity, cat.name AS category_name,
+        p.stock_quantity, COALESCE(NULLIF(p.metadata->>'categoryLabel', ''), cat.name) AS category_name,
         COALESCE(image.url, p.metadata->>'image') AS image_url,
         p.created_at
       FROM ${products} p
@@ -117,8 +117,8 @@ storefront.get('/products', async (c) => {
       ) image ON TRUE
       WHERE p.company_id = $${index + 1}::uuid
         AND p.status = 'active'
-        AND (${searchParam}::text IS NULL OR p.name ILIKE ${searchParam} OR coalesce(p.description, '') ILIKE ${searchParam} OR coalesce(p.seller_name, c.display_name) ILIKE ${searchParam} OR coalesce(cat.name, '') ILIKE ${searchParam})
-        AND (${categoryParam}::text IS NULL OR cat.name = ${categoryParam})
+        AND (${searchParam}::text IS NULL OR p.name ILIKE ${searchParam} OR coalesce(p.description, '') ILIKE ${searchParam} OR coalesce(p.seller_name, c.display_name) ILIKE ${searchParam} OR coalesce(NULLIF(p.metadata->>'categoryLabel', ''), cat.name, '') ILIKE ${searchParam})
+        AND (${categoryParam}::text IS NULL OR COALESCE(NULLIF(p.metadata->>'categoryLabel', ''), cat.name) = ${categoryParam})
     `;
   });
 
