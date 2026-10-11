@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run tests
+        run: npm test
+
       - name: Build Worker
         run: npm run build
 
@@ -45,6 +48,7 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0002_tenant_schemas.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0003_tenant_data_tables.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0004_storefront_checkout.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0005_firebase_google_merchant_auth.sql
 
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v4

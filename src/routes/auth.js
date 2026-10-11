@@ -5,6 +5,7 @@ import { ok, created, jsonResponse, errorResponse } from '../lib/response.js';
 import { createToken } from '../lib/jwt.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { validate, isEmail, isString } from '../middleware/validate.js';
+import { verifyFirebaseGoogleIdToken } from '../lib/firebaseAuth.js';
 
 const auth = new Hono();
 const registerSchema = (body) => {
@@ -51,7 +52,7 @@ auth.post('/login', validate(loginSchema), async (c) => {
     SELECT id, email, full_name, phone, is_platform_admin, password_hash
     FROM users WHERE email = ${body.email.toLowerCase()} LIMIT 1
   `;
-  if (!credentials || !(await bcrypt.compare(body.password, credentials.password_hash))) {
+  if (!credentials || !credentials.password_hash || !(await bcrypt.compare(body.password, credentials.password_hash))) {
     return errorResponse('Invalid email or password', 401);
   }
   const user = {
@@ -60,6 +61,77 @@ auth.post('/login', validate(loginSchema), async (c) => {
   };
   const token = await createToken(user, c.env.JWT_SECRET);
   return jsonResponse(ok({ user, token }, 'Login successful'));
+});
+
+// POST /api/auth/google — verify a Firebase Google ID token, then atomically
+// create/link the Neon user, owner membership, company, and tenant schema.
+auth.post('/google', async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (typeof body?.idToken !== 'string' || !body.idToken || body.idToken.length > 12_000) {
+    return errorResponse('بيانات تسجيل Google غير صالحة.', 400);
+  }
+  const storeName = typeof body.storeName === 'string' ? body.storeName.trim() : '';
+  const phone = typeof body.phone === 'string' ? body.phone.trim() : '';
+  if (storeName && (storeName.length < 2 || storeName.length > 120)) {
+    return errorResponse('اسم المتجر يجب أن يكون بين حرفين و120 حرفًا.', 400);
+  }
+  if (phone.length > 20) return errorResponse('رقم الهاتف غير صالح.', 400);
+
+  let identity;
+  try {
+    identity = await verifyFirebaseGoogleIdToken(body.idToken, c.env.FIREBASE_PROJECT_ID);
+  } catch (error) {
+    if (error?.status === 503) return errorResponse('مصادقة Google غير مهيأة على الخادم.', 503);
+    console.warn(JSON.stringify({ event: 'firebase_google_token_rejected', reason: error?.code || error?.name || 'invalid_token' }));
+    return errorResponse('تعذر التحقق من حساب Google. حدّث التطبيق وحاول مرة أخرى.', 401);
+  }
+  if (!identity) return errorResponse('يجب استخدام حساب Google ببريد مؤكّد.', 401);
+
+  const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 5);
+  const slugBase = storeName.normalize('NFKD').toLowerCase()
+    .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '').slice(0, 40);
+  const companySlug = slugBase ? `${slugBase}-${suffix}` : `merchant-${suffix}`;
+
+  let registration;
+  try {
+    [registration] = await createDb(c.env)`
+      SELECT * FROM public.register_firebase_google_merchant(
+        ${identity.uid}, ${identity.email}, ${identity.fullName || null},
+        ${phone || null}, ${storeName || null}, ${companySlug}
+      )
+    `;
+  } catch (error) {
+    const message = String(error?.message || '');
+    if (message.includes('STORE_NAME_REQUIRED')) {
+      return errorResponse('لإنشاء حساب تاجر جديد، أدخل اسم المتجر ثم اختر المتابعة باستخدام Google.', 400);
+    }
+    if (message.includes('FIREBASE_UID_LINKED') || message.includes('EMAIL_LINKED_TO_ANOTHER_FIREBASE_ACCOUNT')) {
+      return errorResponse('هذا البريد مرتبط بهوية Google مختلفة. استخدم الحساب المرتبط أو تواصل مع إدارة المنصة.', 409);
+    }
+    if (error?.code === '23505') {
+      return errorResponse('البريد أو رقم الهاتف مرتبط بالفعل بحساب آخر.', 409);
+    }
+    throw error;
+  }
+
+  if (!registration?.out_user_id || !registration?.out_company_id) {
+    throw new Error('Firebase merchant registration did not return its account and company.');
+  }
+  const user = {
+    id: registration.out_user_id,
+    email: registration.out_email,
+    full_name: registration.out_full_name,
+    phone: registration.out_phone,
+    is_platform_admin: registration.out_is_platform_admin,
+  };
+  const company = {
+    id: registration.out_company_id,
+    slug: registration.out_company_slug,
+    display_name: registration.out_company_display_name,
+  };
+  const token = await createToken(user, c.env.JWT_SECRET);
+  return jsonResponse(ok({ user, token, company }, 'تم تسجيل الدخول وإنشاء مساحة المتجر بنجاح.'));
 });
 
 // GET /api/auth/me
