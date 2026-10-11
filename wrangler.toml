@@ -3,5 +3,11 @@ main = "src/index.js"
 compatibility_date = "2026-10-08"
 compatibility_flags = ["nodejs_compat"]
 
+[vars]
+FIREBASE_PROJECT_ID = "tager-z"
+
 [secrets]
 required = ["DATABASE_URL", "JWT_SECRET"]
+
+[previews.vars]
+FIREBASE_PROJECT_ID = "tager-z"
