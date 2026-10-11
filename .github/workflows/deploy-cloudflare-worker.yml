@@ -50,19 +50,33 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0004_storefront_checkout.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0005_firebase_google_merchant_auth.sql
 
+      - name: Prepare Worker secrets file
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const keys = ['DATABASE_URL', 'JWT_SECRET'];
+          const missing = keys.filter((key) => !process.env[key]);
+          if (missing.length) {
+            throw new Error(`Missing required deployment secret(s): ${missing.join(', ')}`);
+          }
+          const values = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+          fs.writeFileSync('/tmp/tagerbackend-worker-secrets.json', JSON.stringify(values), { mode: 0o600 });
+          NODE
+
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: "4"
-          command: deploy
-          secrets: |
-            DATABASE_URL
-            JWT_SECRET
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          command: deploy --secrets-file /tmp/tagerbackend-worker-secrets.json
+
+      - name: Remove temporary secrets file
+        if: always()
+        run: rm -f /tmp/tagerbackend-worker-secrets.json
 
       - name: Verify deployed Worker health
         run: curl --fail --silent --show-error --retry 5 --retry-delay 5 https://tagerbackend.ahn90073.workers.dev/health
