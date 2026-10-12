@@ -13,9 +13,17 @@ required = ["DATABASE_URL", "JWT_SECRET"]
 binding = "COMPANY_KYC_DOCUMENTS"
 id = "2bacbaee3a4743bd907f84b1ad99f7ee"
 
+[[kv_namespaces]]
+binding = "PRODUCT_IMAGES"
+id = "fd3f8acec97b4235be3a7b9a9c7102eb"
+
 [previews.vars]
 FIREBASE_PROJECT_ID = "tager-z"
 
 [[previews.kv_namespaces]]
 binding = "COMPANY_KYC_DOCUMENTS"
 id = "bd9e3e0e9b934074869288a65a425279"
+
+[[previews.kv_namespaces]]
+binding = "PRODUCT_IMAGES"
+id = "04d62d9c3a554758a78ba02debd37b67"
