@@ -15,3 +15,7 @@ id = "2bacbaee3a4743bd907f84b1ad99f7ee"
 
 [previews.vars]
 FIREBASE_PROJECT_ID = "tager-z"
+
+[[previews.kv_namespaces]]
+binding = "COMPANY_KYC_DOCUMENTS"
+id = "bd9e3e0e9b934074869288a65a425279"
