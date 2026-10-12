@@ -1,5 +1,5 @@
 -- Company merchant profile and private KYC document metadata.
--- The actual files are stored only in a private Cloudflare R2 bucket.
+-- The file bytes are stored in a Cloudflare Workers KV namespace bound only to the Worker.
 ALTER TABLE public.companies
   ADD COLUMN IF NOT EXISTS commercial_register_number TEXT,
   ADD COLUMN IF NOT EXISTS tax_id TEXT,

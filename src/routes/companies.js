@@ -144,7 +144,7 @@ companies.put('/:companyId/profile', authMiddleware, async (c) => {
   return jsonResponse(ok(profile, 'Company profile saved'));
 });
 
-// POST /api/companies/:companyId/profile/documents/:documentType — private R2 upload.
+// POST /api/companies/:companyId/profile/documents/:documentType — private KV upload.
 companies.post('/:companyId/profile/documents/:documentType', authMiddleware, async (c) => {
   const companyId = c.req.param('companyId');
   const documentType = c.req.param('documentType');
@@ -152,8 +152,8 @@ companies.post('/:companyId/profile/documents/:documentType', authMiddleware, as
   const db = createDb(c.env);
   const denied = await requireCompanyProfileOwner(c, db, companyId);
   if (denied) return denied;
-  const bucket = c.env.COMPANY_KYC_DOCUMENTS;
-  if (!bucket) return errorResponse('Private document storage is not configured', 503);
+  const documentsStore = c.env.COMPANY_KYC_DOCUMENTS;
+  if (!documentsStore) return errorResponse('Private document storage is not configured', 503);
 
   const contentLength = Number(c.req.header('content-length') || 0);
   if (contentLength > MAX_DOCUMENT_BYTES + 64 * 1024) return errorResponse('Document exceeds the 10 MB limit', 413);
@@ -174,9 +174,8 @@ companies.post('/:companyId/profile/documents/:documentType', authMiddleware, as
     LIMIT 1
   `;
 
-  await bucket.put(storageKey, bytes, {
-    httpMetadata: { contentType: detected.contentType },
-    customMetadata: { companyId, documentType, uploadedBy: user.id },
+  await documentsStore.put(storageKey, bytes.buffer, {
+    metadata: { companyId, documentType, uploadedBy: user.id },
   });
   try {
     await db`
@@ -191,7 +190,7 @@ companies.post('/:companyId/profile/documents/:documentType', authMiddleware, as
         uploaded_at = NOW()
     `;
   } catch (error) {
-    await bucket.delete(storageKey).catch(() => {});
+    await documentsStore.delete(storageKey).catch(() => {});
     throw error;
   }
   const [currentDocument] = await db`
@@ -200,9 +199,9 @@ companies.post('/:companyId/profile/documents/:documentType', authMiddleware, as
     LIMIT 1
   `;
   if (currentDocument?.storage_key !== storageKey) {
-    await bucket.delete(storageKey).catch(() => console.warn('Unable to remove a superseded company profile upload'));
+    await documentsStore.delete(storageKey).catch(() => console.warn('Unable to remove a superseded company profile upload'));
   } else if (previous?.storage_key && previous.storage_key !== currentDocument.storage_key) {
-    await bucket.delete(previous.storage_key).catch(() => console.warn('Unable to remove replaced company profile document'));
+    await documentsStore.delete(previous.storage_key).catch(() => console.warn('Unable to remove replaced company profile document'));
   }
   const profile = await loadCompanyProfile(db, companyId);
   return jsonResponse(ok(profile, 'Company document uploaded privately'));
@@ -216,23 +215,23 @@ companies.get('/:companyId/profile/documents/:documentType', authMiddleware, asy
   const db = createDb(c.env);
   const denied = await requireCompanyProfileOwner(c, db, companyId);
   if (denied) return denied;
-  const bucket = c.env.COMPANY_KYC_DOCUMENTS;
-  if (!bucket) return errorResponse('Private document storage is not configured', 503);
+  const documentsStore = c.env.COMPANY_KYC_DOCUMENTS;
+  if (!documentsStore) return errorResponse('Private document storage is not configured', 503);
   const [document] = await db`
     SELECT storage_key, content_type FROM public.company_profile_documents
     WHERE company_id = ${companyId} AND document_type = ${documentType}
     LIMIT 1
   `;
   if (!document) return errorResponse('Company document not found', 404);
-  const object = await bucket.get(document.storage_key);
-  if (!object) return errorResponse('Stored company document not found', 404);
+  const bytes = await documentsStore.get(document.storage_key, { type: 'arrayBuffer', cacheTtl: 30 });
+  if (!bytes) return errorResponse('Stored company document not found', 404);
   const headers = new Headers();
   headers.set('Content-Type', document.content_type);
   headers.set('Content-Disposition', `attachment; filename="${documentType}.${documentExtensions[document.content_type]}"`);
   headers.set('Cache-Control', 'private, no-store, max-age=0');
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Content-Security-Policy', "default-src 'none'; sandbox");
-  return new Response(object.body, { status: 200, headers });
+  return new Response(bytes, { status: 200, headers });
 });
 
 // GET /api/companies/:companyId — company access is available to active members.
