@@ -12,6 +12,8 @@ Multi-tenant marketplace API built with Hono on Cloudflare Workers. **All applic
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0002_tenant_schemas.sql
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0003_tenant_data_tables.sql
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0004_storefront_checkout.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0005_firebase_google_merchant_auth.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0006_company_profile.sql
    ```
 
    These migrations are additive and repeatable; they do not drop existing data. They do not copy accounts or other records from the former Supabase database.
@@ -40,11 +42,11 @@ Before enabling the workflow, add these repository **Actions secrets** in GitHub
 
 | Secret | Value |
 |---|---|
-| `CLOUDFLARE_API_TOKEN` | A Cloudflare API token scoped to the target account with Workers Scripts edit permission. |
+| `CLOUDFLARE_API_TOKEN` | A Cloudflare API token scoped to the target account with Workers Scripts edit and the `Workers R2 Storage Write` permission group. |
 | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account ID hosting the `tagerbackend` Worker. |
 | `DATABASE_URL` | The Neon PostgreSQL connection string. The workflow sets this as a Cloudflare Worker secret on each deployment. |
 
-GitHub Actions passes the masked `DATABASE_URL` secret to `psql` to apply migrations `0001_initial.sql` through `0004_storefront_checkout.sql` before deployment, then to Wrangler to create or update the Worker runtime secret with the same name. User identities, companies, and memberships remain in `public` for authentication; tenant business data is stored in real per-company schemas. `0003_tenant_data_tables.sql` converts the earlier tenant views into tables, migrates existing categories/products, and provisions tables for product media/variants, inventory, customers/addresses, carts, orders/items, payments, shipments, coupons, reviews, wishlists, device tokens, notifications, and audit logs. Legacy `public.categories` and `public.products` rows are retained as a rollback copy; application reads and writes use the tenant tables. New products are always `pending`; the platform-admin moderation API can change them to `active` after approval. `0004_storefront_checkout.sql` adds an atomic public checkout function: it rechecks prices/stock in the database, reserves stock, and creates a separate pending order and shipment in each seller schema. `JWT_SECRET` remains configured on the Worker and is not changed by this workflow. Never place connection strings or Cloudflare tokens in committed workflow files.
+GitHub Actions passes the masked `DATABASE_URL` secret to `psql` to apply migrations `0001_initial.sql` through `0006_company_profile.sql` before deployment, then to Wrangler to create or update the Worker runtime secret with the same name. It also creates the private `tager-company-kyc-private` R2 bucket if it does not already exist and binds it to the Worker; the bucket is not configured for public access. The profile API restricts KYC documents and payout/tax details to active company owners and admins. User identities, companies, and memberships remain in `public` for authentication; tenant business data is stored in real per-company schemas. `0003_tenant_data_tables.sql` converts the earlier tenant views into tables, migrates existing categories/products, and provisions tables for product media/variants, inventory, customers/addresses, carts, orders/items, payments, shipments, coupons, reviews, wishlists, device tokens, notifications, and audit logs. Legacy `public.categories` and `public.products` rows are retained as a rollback copy; application reads and writes use the tenant tables. New products are always `pending`; the platform-admin moderation API can change them to `active` after approval. `0004_storefront_checkout.sql` adds an atomic public checkout function: it rechecks prices/stock in the database, reserves stock, and creates a separate pending order and shipment in each seller schema. `JWT_SECRET` remains configured on the Worker and is not changed by this workflow. Never place connection strings or Cloudflare tokens in committed workflow files.
 
 > Existing users and records remain untouched in the old database but are not visible to this Neon-backed API. If those records are needed, migrate them to Neon before switching traffic. Do not delete the old database as part of this code change.
 
@@ -66,6 +68,10 @@ GitHub Actions passes the masked `DATABASE_URL` secret to `psql` to apply migrat
 | POST | `/api/companies` | Create company and owner membership atomically in Neon |
 | GET | `/api/companies` | List companies for the authenticated user |
 | GET | `/api/companies/:companyId` | Get member-accessible company details |
+| GET | `/api/companies/:companyId/profile` | Read private profile and completion status (active owner/admin only) |
+| PUT | `/api/companies/:companyId/profile` | Save profile fields; omitted values remain unchanged |
+| POST | `/api/companies/:companyId/profile/documents/:documentType` | Upload a PDF/JPEG/PNG document to private R2 (10 MB limit) |
+| GET | `/api/companies/:companyId/profile/documents/:documentType` | Download an uploaded document (active owner/admin only) |
 
 ### Products
 

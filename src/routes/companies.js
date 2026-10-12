@@ -3,8 +3,18 @@ import { createDb } from '../lib/db.js';
 import { ok, created, jsonResponse, errorResponse } from '../lib/response.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { validate, isEmail, isString, matches } from '../middleware/validate.js';
+import {
+  COMPANY_PROFILE_DOCUMENT_TYPES,
+  detectCompanyDocumentType,
+  getCompanyProfileCompletion,
+  mergeCompanyProfile,
+  validateCompanyProfile,
+} from '../lib/companyProfile.js';
 
 const companies = new Hono();
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+const documentExtensions = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png' };
+
 const createCompanySchema = (body) => {
   const errors = [];
   if (!isString(body.slug) || !matches(body.slug, /^[a-z0-9-]+$/)) errors.push({ field: 'slug', message: 'Slug must contain only lowercase letters, numbers, and hyphens' });
@@ -14,6 +24,39 @@ const createCompanySchema = (body) => {
   if (body.email && !isEmail(body.email)) errors.push({ field: 'email', message: 'A valid email is required' });
   return { valid: errors.length === 0, errors };
 };
+
+async function requireCompanyProfileOwner(c, db, companyId) {
+  const user = c.get('user');
+  const [membership] = await db`
+    SELECT cm.role, cm.is_active
+    FROM public.companies c
+    LEFT JOIN public.company_members cm ON cm.company_id = c.id AND cm.user_id = ${user.id}
+    WHERE c.id = ${companyId}
+    LIMIT 1
+  `;
+  if (!membership) return errorResponse('Company not found', 404);
+  if (!membership.is_active) return errorResponse('You do not have active access to this company', 403);
+  if (!['owner', 'admin'].includes(membership.role)) return errorResponse('Company owner access is required for sensitive profile data', 403);
+  return null;
+}
+
+async function loadCompanyProfile(db, companyId) {
+  const [companyRow] = await db`
+    SELECT c.*
+    FROM public.companies c
+    WHERE c.id = ${companyId}
+    LIMIT 1
+  `;
+  if (!companyRow) return null;
+  const company = { ...companyRow, email: companyRow.email || '' };
+  const documents = await db`
+    SELECT document_type, content_type, size_bytes, uploaded_at
+    FROM public.company_profile_documents
+    WHERE company_id = ${companyId}
+    ORDER BY document_type
+  `;
+  return { company, documents, completion: getCompanyProfileCompletion(company, documents) };
+}
 
 // POST /api/companies — atomically create the company and its owner membership.
 companies.post('/', authMiddleware, validate(createCompanySchema), async (c) => {
@@ -37,25 +80,169 @@ companies.post('/', authMiddleware, validate(createCompanySchema), async (c) => 
   }
 });
 
-// GET /api/companies
+// GET /api/companies — companies accessible to the authenticated user.
 companies.get('/', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = createDb(c.env);
   const rows = await db`
-    SELECT c.*, cm.role, cm.is_active AS membership_active
+    SELECT c.id, c.slug, c.legal_name, c.display_name, c.email, c.status, c.created_at, c.updated_at,
+           cm.role, cm.is_active AS membership_active
     FROM companies c JOIN company_members cm ON cm.company_id = c.id
     WHERE cm.user_id = ${user.id} AND cm.is_active = TRUE ORDER BY c.created_at DESC
   `;
   return jsonResponse(ok(rows));
 });
 
-// GET /api/companies/:companyId
+// GET /api/companies/:companyId/profile — sensitive company data is owner/admin-only.
+companies.get('/:companyId/profile', authMiddleware, async (c) => {
+  const companyId = c.req.param('companyId');
+  const db = createDb(c.env);
+  const denied = await requireCompanyProfileOwner(c, db, companyId);
+  if (denied) return denied;
+  const profile = await loadCompanyProfile(db, companyId);
+  if (!profile) return errorResponse('Company not found', 404);
+  return jsonResponse(ok(profile));
+});
+
+// PUT /api/companies/:companyId/profile — save partial profile progress without marking it verified.
+companies.put('/:companyId/profile', authMiddleware, async (c) => {
+  const companyId = c.req.param('companyId');
+  const db = createDb(c.env);
+  const denied = await requireCompanyProfileOwner(c, db, companyId);
+  if (denied) return denied;
+
+  let body;
+  try { body = await c.req.json(); } catch { return errorResponse('A JSON profile body is required', 400); }
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length === 0) {
+    return errorResponse('At least one company profile field is required', 400);
+  }
+  const [existing] = await db`
+    SELECT legal_name, display_name, email, commercial_register_number, tax_id,
+           warehouse_address, payout_method, payout_number
+    FROM public.companies WHERE id = ${companyId} LIMIT 1
+  `;
+  if (!existing) return errorResponse('Company not found', 404);
+  const validation = validateCompanyProfile(mergeCompanyProfile(existing, body));
+  if (!validation.valid) return jsonResponse({ success: false, message: 'Company profile validation failed', errors: validation.errors }, 400);
+  const value = validation.value;
+  const [company] = await db`
+    UPDATE public.companies
+    SET legal_name = ${value.legalName},
+        display_name = ${value.displayName},
+        email = ${value.email},
+        commercial_register_number = ${value.commercialRegisterNumber},
+        tax_id = ${value.taxId},
+        warehouse_address = ${JSON.stringify(value.warehouseAddress)}::jsonb,
+        payout_method = ${value.payoutMethod},
+        payout_number = ${value.payoutNumber},
+        updated_at = NOW()
+    WHERE id = ${companyId}
+    RETURNING *
+  `;
+  if (!company) return errorResponse('Company not found', 404);
+  const profile = await loadCompanyProfile(db, companyId);
+  return jsonResponse(ok(profile, 'Company profile saved'));
+});
+
+// POST /api/companies/:companyId/profile/documents/:documentType — private R2 upload.
+companies.post('/:companyId/profile/documents/:documentType', authMiddleware, async (c) => {
+  const companyId = c.req.param('companyId');
+  const documentType = c.req.param('documentType');
+  if (!COMPANY_PROFILE_DOCUMENT_TYPES.includes(documentType)) return errorResponse('Unsupported company document type', 400);
+  const db = createDb(c.env);
+  const denied = await requireCompanyProfileOwner(c, db, companyId);
+  if (denied) return denied;
+  const bucket = c.env.COMPANY_KYC_DOCUMENTS;
+  if (!bucket) return errorResponse('Private document storage is not configured', 503);
+
+  const contentLength = Number(c.req.header('content-length') || 0);
+  if (contentLength > MAX_DOCUMENT_BYTES + 64 * 1024) return errorResponse('Document exceeds the 10 MB limit', 413);
+  let form;
+  try { form = await c.req.formData(); } catch { return errorResponse('Upload must use multipart form data', 400); }
+  const file = form.get('file');
+  if (!file || typeof file.arrayBuffer !== 'function' || typeof file.size !== 'number') return errorResponse('A document file is required', 400);
+  if (file.size <= 0 || file.size > MAX_DOCUMENT_BYTES) return errorResponse('Document must be between 1 byte and 10 MB', 413);
+
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const detected = detectCompanyDocumentType(bytes);
+  if (!detected) return errorResponse('Only real PDF, JPEG, or PNG files are accepted', 415);
+  const storageKey = `${companyId}/${documentType}/${crypto.randomUUID()}.${detected.extension}`;
+  const user = c.get('user');
+  const [previous] = await db`
+    SELECT storage_key FROM public.company_profile_documents
+    WHERE company_id = ${companyId} AND document_type = ${documentType}
+    LIMIT 1
+  `;
+
+  await bucket.put(storageKey, bytes, {
+    httpMetadata: { contentType: detected.contentType },
+    customMetadata: { companyId, documentType, uploadedBy: user.id },
+  });
+  try {
+    await db`
+      INSERT INTO public.company_profile_documents
+        (company_id, document_type, storage_key, content_type, size_bytes, uploaded_by, uploaded_at)
+      VALUES (${companyId}, ${documentType}, ${storageKey}, ${detected.contentType}, ${bytes.byteLength}, ${user.id}, NOW())
+      ON CONFLICT (company_id, document_type) DO UPDATE SET
+        storage_key = EXCLUDED.storage_key,
+        content_type = EXCLUDED.content_type,
+        size_bytes = EXCLUDED.size_bytes,
+        uploaded_by = EXCLUDED.uploaded_by,
+        uploaded_at = NOW()
+    `;
+  } catch (error) {
+    await bucket.delete(storageKey).catch(() => {});
+    throw error;
+  }
+  const [currentDocument] = await db`
+    SELECT storage_key FROM public.company_profile_documents
+    WHERE company_id = ${companyId} AND document_type = ${documentType}
+    LIMIT 1
+  `;
+  if (currentDocument?.storage_key !== storageKey) {
+    await bucket.delete(storageKey).catch(() => console.warn('Unable to remove a superseded company profile upload'));
+  } else if (previous?.storage_key && previous.storage_key !== currentDocument.storage_key) {
+    await bucket.delete(previous.storage_key).catch(() => console.warn('Unable to remove replaced company profile document'));
+  }
+  const profile = await loadCompanyProfile(db, companyId);
+  return jsonResponse(ok(profile, 'Company document uploaded privately'));
+});
+
+// GET /api/companies/:companyId/profile/documents/:documentType — authenticated private download.
+companies.get('/:companyId/profile/documents/:documentType', authMiddleware, async (c) => {
+  const companyId = c.req.param('companyId');
+  const documentType = c.req.param('documentType');
+  if (!COMPANY_PROFILE_DOCUMENT_TYPES.includes(documentType)) return errorResponse('Unsupported company document type', 400);
+  const db = createDb(c.env);
+  const denied = await requireCompanyProfileOwner(c, db, companyId);
+  if (denied) return denied;
+  const bucket = c.env.COMPANY_KYC_DOCUMENTS;
+  if (!bucket) return errorResponse('Private document storage is not configured', 503);
+  const [document] = await db`
+    SELECT storage_key, content_type FROM public.company_profile_documents
+    WHERE company_id = ${companyId} AND document_type = ${documentType}
+    LIMIT 1
+  `;
+  if (!document) return errorResponse('Company document not found', 404);
+  const object = await bucket.get(document.storage_key);
+  if (!object) return errorResponse('Stored company document not found', 404);
+  const headers = new Headers();
+  headers.set('Content-Type', document.content_type);
+  headers.set('Content-Disposition', `attachment; filename="${documentType}.${documentExtensions[document.content_type]}"`);
+  headers.set('Cache-Control', 'private, no-store, max-age=0');
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Content-Security-Policy', "default-src 'none'; sandbox");
+  return new Response(object.body, { status: 200, headers });
+});
+
+// GET /api/companies/:companyId — company access is available to active members.
 companies.get('/:companyId', authMiddleware, async (c) => {
   const user = c.get('user');
   const companyId = c.req.param('companyId');
   const db = createDb(c.env);
   const [company] = await db`
-    SELECT c.*, cm.role, cm.is_active AS membership_active
+    SELECT c.id, c.slug, c.legal_name, c.display_name, c.email, c.status, c.created_at, c.updated_at,
+           cm.role, cm.is_active AS membership_active
     FROM companies c JOIN company_members cm ON cm.company_id = c.id
     WHERE c.id = ${companyId} AND cm.user_id = ${user.id} LIMIT 1
   `;
