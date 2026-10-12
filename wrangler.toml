@@ -9,5 +9,9 @@ FIREBASE_PROJECT_ID = "tager-z"
 [secrets]
 required = ["DATABASE_URL", "JWT_SECRET"]
 
+[[r2_buckets]]
+binding = "COMPANY_KYC_DOCUMENTS"
+bucket_name = "tager-company-kyc-private"
+
 [previews.vars]
 FIREBASE_PROJECT_ID = "tager-z"

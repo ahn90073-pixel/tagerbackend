@@ -141,7 +141,8 @@ auth.get('/me', authMiddleware, async (c) => {
   const [profile] = await db`SELECT id, email, full_name, phone, is_platform_admin, created_at FROM users WHERE id = ${user.id} LIMIT 1`;
   if (!profile) return errorResponse('User not found', 404);
   const companies = await db`
-    SELECT c.*, cm.role, cm.is_active AS membership_active
+    SELECT c.id, c.slug, c.legal_name, c.display_name, c.email, c.status, c.created_at, c.updated_at,
+           cm.role, cm.is_active AS membership_active
     FROM companies c JOIN company_members cm ON cm.company_id = c.id
     WHERE cm.user_id = ${user.id} AND cm.is_active = TRUE ORDER BY c.created_at DESC
   `;
@@ -153,7 +154,8 @@ auth.get('/me/companies', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = createDb(c.env);
   const companies = await db`
-    SELECT c.*, cm.role, cm.is_active AS membership_active
+    SELECT c.id, c.slug, c.legal_name, c.display_name, c.email, c.status, c.created_at, c.updated_at,
+           cm.role, cm.is_active AS membership_active
     FROM companies c JOIN company_members cm ON cm.company_id = c.id
     WHERE cm.user_id = ${user.id} AND cm.is_active = TRUE ORDER BY c.created_at DESC
   `;

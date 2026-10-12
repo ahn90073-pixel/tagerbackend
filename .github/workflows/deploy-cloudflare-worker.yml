@@ -38,6 +38,17 @@ jobs:
       - name: Build Worker
         run: npm run build
 
+      - name: Ensure private company profile bucket exists
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if npx wrangler r2 bucket info tager-company-kyc-private >/dev/null 2>&1; then
+            echo "Private R2 bucket already exists."
+          else
+            npx wrangler r2 bucket create tager-company-kyc-private
+          fi
+
       - name: Apply Neon schema migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -49,6 +60,7 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0003_tenant_data_tables.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0004_storefront_checkout.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0005_firebase_google_merchant_auth.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0006_company_profile.sql
 
       - name: Prepare Worker secrets file
         env:
