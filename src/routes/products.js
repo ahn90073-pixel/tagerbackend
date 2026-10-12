@@ -5,18 +5,38 @@ import { authMiddleware, requireAdmin } from '../middleware/auth.js';
 import { validate, isString, isNonNegativeNumber, isUUID } from '../middleware/validate.js';
 import { slugify } from '../lib/slugify.js';
 import { requireCompanyTenant, tenantTable } from '../lib/tenantDb.js';
+import {
+  decodeProductImageDataUrl,
+  detectProductImageType,
+  MAX_PRODUCT_IMAGE_BYTES,
+  MAX_PRODUCT_IMAGES,
+  MAX_PRODUCT_CREATE_REQUEST_BYTES,
+  isHttpProductImageUrl,
+  isProductImageDataUrl,
+} from '../lib/productImages.js';
 
 const products = new Hono();
-const createProductSchema = (body) => {
+export const createProductSchema = (body) => {
   const errors = [];
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { valid: false, errors: [{ field: 'body', message: 'Product data is required' }] };
+  }
   if (!isString(body.sku)) errors.push({ field: 'sku', message: 'SKU is required' });
   if (!isString(body.name)) errors.push({ field: 'name', message: 'Product name is required' });
   if (!isNonNegativeNumber(body.price)) errors.push({ field: 'price', message: 'Price must be a non-negative number' });
   if (body.stockQuantity !== undefined && (!Number.isInteger(body.stockQuantity) || body.stockQuantity < 0)) errors.push({ field: 'stockQuantity', message: 'Stock quantity must be a non-negative integer' });
   if (body.compareAtPrice !== undefined && !isNonNegativeNumber(body.compareAtPrice)) errors.push({ field: 'compareAtPrice', message: 'Compare-at price must be non-negative' });
-  if (body.costPrice !== undefined && !isNonNegativeNumber(body.costPrice)) errors.push({ field: 'costPrice', message: 'Cost price must be a non-negative number' });
+  if (body.costPrice !== undefined && !isNonNegativeNumber(body.costPrice)) errors.push({ field: 'costPrice', message: 'Cost price must be non-negative' });
   if (body.weightGrams !== undefined && (typeof body.weightGrams !== 'number' || body.weightGrams < 0)) errors.push({ field: 'weightGrams', message: 'Weight must be a non-negative integer' });
   if (body.categoryId && !isUUID(body.categoryId)) errors.push({ field: 'categoryId', message: 'Category ID must be a valid UUID' });
+  if (body.metadata !== undefined && (!body.metadata || typeof body.metadata !== 'object' || Array.isArray(body.metadata))) errors.push({ field: 'metadata', message: 'Product metadata must be an object' });
+  if (body.images !== undefined) errors.push({ field: 'images', message: 'Upload product images as files, not JSON values' });
+  if (body.metadata && Object.prototype.hasOwnProperty.call(body.metadata, 'image')) {
+    const image = body.metadata.image;
+    if (typeof image !== 'string') errors.push({ field: 'metadata.image', message: 'Product image must be a URL or an uploaded image file' });
+    else if (!isProductImageDataUrl(image) && image.trim() !== '' && !isHttpProductImageUrl(image)) errors.push({ field: 'metadata.image', message: 'Product image must be an absolute HTTP(S) URL or an uploaded image file' });
+    if (typeof image === 'string' && !isProductImageDataUrl(image) && image.length > 2048) errors.push({ field: 'metadata.image', message: 'Product image URL is too long' });
+  }
   return { valid: errors.length === 0, errors };
 };
 const productStatuses = ['draft', 'pending', 'active', 'archived'];
@@ -25,22 +45,93 @@ const updateProductStatusSchema = (body) => {
     ? [{ field: 'status', message: `Status must be one of: ${productStatuses.join(', ')}` }] : [];
   return { valid: errors.length === 0, errors };
 };
-const updateProductSchema = (body) => {
+export const updateProductSchema = (body) => {
   const errors = [];
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { valid: false, errors: [{ field: 'body', message: 'Product update data is required' }] };
+  }
   if (body.price !== undefined && !isNonNegativeNumber(body.price)) errors.push({ field: 'price', message: 'Price must be a non-negative number' });
   if (body.stockQuantity !== undefined && (!Number.isInteger(body.stockQuantity) || body.stockQuantity < 0)) errors.push({ field: 'stockQuantity', message: 'Stock quantity must be a non-negative integer' });
   if (body.name !== undefined && typeof body.name !== 'string') errors.push({ field: 'name', message: 'Name must be a string' });
+  if (body.metadata !== undefined && (!body.metadata || typeof body.metadata !== 'object' || Array.isArray(body.metadata))) errors.push({ field: 'metadata', message: 'Product metadata must be an object' });
+  if (body.metadata && Object.prototype.hasOwnProperty.call(body.metadata, 'image')) {
+    const image = body.metadata.image;
+    if (typeof image !== 'string') errors.push({ field: 'metadata.image', message: 'Product image must be a URL' });
+    else if (isProductImageDataUrl(image) || (image.trim() !== '' && !isHttpProductImageUrl(image)) || image.length > 2048) {
+      errors.push({ field: 'metadata.image', message: 'Use an absolute HTTP(S) image URL instead of storing image data in Neon' });
+    }
+  }
   return { valid: errors.length === 0, errors };
 };
 
-// POST /api/companies/:companyId/products — every product is created pending moderation.
-products.post('/:companyId/products', authMiddleware, validate(createProductSchema), async (c) => {
-  const body = c.get('body'); const user = c.get('user'); const companyId = c.req.param('companyId'); const db = createDb(c.env);
+async function readProductCreatePayload(c) {
+  const contentLength = Number(c.req.header('content-length') || 0);
+  if (Number.isFinite(contentLength) && contentLength > MAX_PRODUCT_CREATE_REQUEST_BYTES) {
+    return { error: errorResponse('Product image request must not exceed 11 MiB', 413) };
+  }
+  const contentType = (c.req.header('content-type') || '').toLowerCase();
+  if (!contentType.includes('multipart/form-data')) {
+    const body = await c.req.json().catch(() => null);
+    return { body, files: [] };
+  }
+
+  let form;
+  try {
+    form = await c.req.formData();
+  } catch {
+    return { error: errorResponse('Upload must use valid multipart form data', 400) };
+  }
+
+  const serialized = form.get('product');
+  if (typeof serialized !== 'string') return { error: errorResponse('Product data is required', 400) };
+  let body;
+  try {
+    body = JSON.parse(serialized);
+  } catch {
+    return { error: errorResponse('Product data must be valid JSON', 400) };
+  }
+
+  const entries = form.getAll('images');
+  if (entries.some((entry) => !entry || typeof entry.arrayBuffer !== 'function' || typeof entry.size !== 'number')) {
+    return { error: errorResponse('Product images must be uploaded as files', 400) };
+  }
+  return { body, files: entries };
+}
+
+function productImagesJoin(imagesTable) {
+  return `LEFT JOIN LATERAL (
+    SELECT
+      COALESCE(jsonb_agg(jsonb_build_object(
+        'id', image.id,
+        'url', image.url,
+        'altText', image.alt_text,
+        'sortOrder', image.sort_order,
+        'isPrimary', image.is_primary
+      ) ORDER BY image.is_primary DESC, image.sort_order ASC, image.created_at ASC), '[]'::jsonb) AS images,
+      (array_agg(image.url ORDER BY image.is_primary DESC, image.sort_order ASC, image.created_at ASC))[1] AS image_url
+    FROM ${imagesTable} image
+    WHERE image.product_id = product.id
+  ) product_image_data ON TRUE`;
+}
+
+// POST /api/companies/:companyId/products — products are created pending moderation.
+// Uploaded image bytes go to PRODUCT_IMAGES KV; Neon stores only stable URL strings.
+products.post('/:companyId/products', authMiddleware, async (c) => {
+  const parsed = await readProductCreatePayload(c);
+  if (parsed.error) return parsed.error;
+  const body = parsed.body;
+  const validation = createProductSchema(body);
+  if (!validation.valid) return errorResponse('Validation failed', 400, validation.errors);
+
+  const user = c.get('user');
+  const companyId = c.req.param('companyId');
+  const db = createDb(c.env);
   const tenant = await requireCompanyTenant(db, companyId, user.id);
   if (tenant.error) return tenant.error;
+
   const categoryTable = tenantTable(tenant.schema, 'categories');
   const productTable = tenantTable(tenant.schema, 'products');
-
+  const imagesTable = tenantTable(tenant.schema, 'product_images');
   if (body.categoryId) {
     const [category] = await db.query(
       `SELECT id FROM ${categoryTable} WHERE id = $1 AND company_id = $2 LIMIT 1`,
@@ -49,26 +140,125 @@ products.post('/:companyId/products', authMiddleware, validate(createProductSche
     if (!category) return errorResponse('Category not found in this company', 400);
   }
 
+  const metadata = { ...(body.metadata || {}) };
+  let legacyImage = null;
+  if (isProductImageDataUrl(metadata.image)) {
+    legacyImage = decodeProductImageDataUrl(metadata.image);
+    if (!legacyImage) return errorResponse('Legacy image data must be a valid JPEG, PNG, or WebP file up to 5 MB', 415);
+    if (parsed.files.length) return errorResponse('Upload each product image only once', 400);
+    metadata.image = '';
+  }
+
+  const imageSources = parsed.files.map((file) => ({ file }));
+  if (legacyImage) imageSources.push({ legacy: legacyImage });
+  if (imageSources.length > MAX_PRODUCT_IMAGES) {
+    return errorResponse(`A product can have at most ${MAX_PRODUCT_IMAGES} images`, 400);
+  }
+  if (imageSources.length && !c.env.PRODUCT_IMAGES) {
+    return errorResponse('Product image storage is not configured', 503);
+  }
+
+  const preparedImages = [];
+  for (const source of imageSources) {
+    let bytes;
+    let detected;
+    if (source.legacy) {
+      bytes = source.legacy.bytes;
+      detected = source.legacy;
+    } else {
+      if (source.file.size <= 0 || source.file.size > MAX_PRODUCT_IMAGE_BYTES) {
+        return errorResponse('Each product image must be between 1 byte and 5 MB', 413);
+      }
+      bytes = new Uint8Array(await source.file.arrayBuffer());
+      detected = detectProductImageType(bytes);
+      if (!detected) return errorResponse('Only real JPEG, PNG, or WebP images are accepted', 415);
+      if (source.file.type && source.file.type !== 'application/octet-stream' && source.file.type !== detected.contentType) {
+        return errorResponse('Image content does not match its declared file type', 415);
+      }
+    }
+    if (bytes.byteLength <= 0 || bytes.byteLength > MAX_PRODUCT_IMAGE_BYTES) {
+      return errorResponse('Each product image must be between 1 byte and 5 MB', 413);
+    }
+
+    const id = crypto.randomUUID();
+    const imageUrl = new URL(
+      `/api/storefront/media/products/${encodeURIComponent(companyId)}/${id}.${detected.extension}`,
+      c.req.url,
+    ).toString();
+    preparedImages.push({
+      id,
+      key: `products/${companyId}/${id}`,
+      url: imageUrl,
+      contentType: detected.contentType,
+      extension: detected.extension,
+      bytes,
+      altText: body.name,
+      sortOrder: preparedImages.length,
+      isPrimary: preparedImages.length === 0,
+    });
+  }
+
+  try {
+    for (const image of preparedImages) {
+      await c.env.PRODUCT_IMAGES.put(image.key, image.bytes.buffer, {
+        metadata: { companyId, imageId: image.id, contentType: image.contentType },
+      });
+    }
+  } catch (error) {
+    await Promise.allSettled(preparedImages.map(({ key }) => c.env.PRODUCT_IMAGES.delete(key)));
+    console.error('Unable to store product image in KV.', error);
+    return errorResponse('تعذر تخزين صور المنتج الآن. حاول مرة أخرى.', 503);
+  }
+
+  if (preparedImages.length) metadata.image = preparedImages[0].url;
+  const imagesJson = JSON.stringify(preparedImages.map(({ id, url, altText, sortOrder, isPrimary }) => ({
+    id, url, alt_text: altText, sort_order: sortOrder, is_primary: isPrimary,
+  })));
+
   try {
     const [product] = await db.query(
-      `INSERT INTO ${productTable} (
-        company_id, category_id, sku, name, slug, description, short_description, status,
-        price, compare_at_price, cost_price, currency, weight_grams, brand, seller_name,
-        trusted_seller, free_shipping, is_featured, is_flash_deal, badge, metadata, stock_quantity
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13, $14,
-        $15, $16, $17, $18, $19, $20::jsonb, $21
-      ) RETURNING *`,
+      `WITH new_product AS (
+        INSERT INTO ${productTable} (
+          company_id, category_id, sku, name, slug, description, short_description, status,
+          price, compare_at_price, cost_price, currency, weight_grams, brand, seller_name,
+          trusted_seller, free_shipping, is_featured, is_flash_deal, badge, metadata, stock_quantity
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13, $14,
+          $15, $16, $17, $18, $19, $20::jsonb, $21
+        ) RETURNING *
+      ), new_images AS (
+        INSERT INTO ${imagesTable} (id, product_id, url, alt_text, sort_order, is_primary)
+        SELECT image.id::uuid, product.id, image.url, image.alt_text, image.sort_order, image.is_primary
+        FROM new_product product
+        CROSS JOIN jsonb_to_recordset($22::jsonb) AS image(
+          id text, url text, alt_text text, sort_order integer, is_primary boolean
+        )
+        RETURNING id, product_id, url, alt_text, sort_order, is_primary, created_at
+      )
+      SELECT product.*,
+        COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+            'id', image.id,
+            'url', image.url,
+            'altText', image.alt_text,
+            'sortOrder', image.sort_order,
+            'isPrimary', image.is_primary
+          ) ORDER BY image.is_primary DESC, image.sort_order ASC, image.created_at ASC)
+          FROM new_images image WHERE image.product_id = product.id
+        ), '[]'::jsonb) AS images
+      FROM new_product product`,
       [companyId, body.categoryId || null, body.sku, body.name,
         `${slugify(body.name)}-${Date.now().toString(36)}`, body.description || null,
         body.shortDescription || null, body.price, body.compareAtPrice ?? null,
         body.costPrice ?? null, body.currency || 'EGP', body.weightGrams ?? null,
         body.brand || null, body.sellerName || null, body.trustedSeller || false,
         body.freeShipping || false, body.isFeatured || false, body.isFlashDeal || false,
-        body.badge || null, JSON.stringify(body.metadata || {}), body.stockQuantity ?? 0]
+        body.badge || null, JSON.stringify(metadata), body.stockQuantity ?? 0, imagesJson]
     );
+    if (!product) throw new Error('Product insert returned no row.');
     return jsonResponse(created(product, 'Product created — pending admin approval'), 201);
   } catch (error) {
+    await Promise.allSettled(preparedImages.map(({ key }) => c.env.PRODUCT_IMAGES.delete(key)));
     if (error.code === '23505') return errorResponse('A product with this SKU already exists in your company', 409);
     throw error;
   }
@@ -83,10 +273,14 @@ products.get('/:companyId/products', authMiddleware, async (c) => {
   const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20', 10)));
   const offset = (page - 1) * limit; const status = c.req.query('status') || null;
   const table = tenantTable(tenant.schema, 'products');
+  const imageJoin = productImagesJoin(tenantTable(tenant.schema, 'product_images'));
   const rows = await db.query(
-    `SELECT *, count(*) OVER()::int AS _total FROM ${table}
-     WHERE company_id = $1 AND ($2::text IS NULL OR status = $2)
-     ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
+    `SELECT product.*, count(*) OVER()::int AS _total,
+       product_image_data.images, COALESCE(product_image_data.image_url, product.metadata->>'image') AS image_url
+     FROM ${table} product
+     ${imageJoin}
+     WHERE product.company_id = $1 AND ($2::text IS NULL OR product.status = $2)
+     ORDER BY product.created_at DESC LIMIT $3 OFFSET $4`,
     [companyId, status, limit, offset]
   );
   const total = rows.length ? rows[0]._total : 0;
@@ -98,8 +292,13 @@ products.get('/:companyId/products/:productId', authMiddleware, async (c) => {
   const user = c.get('user'); const companyId = c.req.param('companyId'); const productId = c.req.param('productId'); const db = createDb(c.env);
   const tenant = await requireCompanyTenant(db, companyId, user.id);
   if (tenant.error) return tenant.error;
+  const imageJoin = productImagesJoin(tenantTable(tenant.schema, 'product_images'));
   const [product] = await db.query(
-    `SELECT * FROM ${tenantTable(tenant.schema, 'products')} WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    `SELECT product.*, product_image_data.images,
+       COALESCE(product_image_data.image_url, product.metadata->>'image') AS image_url
+     FROM ${tenantTable(tenant.schema, 'products')} product
+     ${imageJoin}
+     WHERE product.id = $1 AND product.company_id = $2 LIMIT 1`,
     [productId, companyId]
   );
   if (!product) return errorResponse('Product not found', 404);
@@ -124,10 +323,10 @@ products.put('/:companyId/products/:productId', authMiddleware, validate(updateP
      WHERE id = $17 AND company_id = $18 RETURNING *`,
     [body.name ?? null, body.description ?? null, body.shortDescription ?? null,
       body.price ?? null, body.compareAtPrice ?? null, body.costPrice ?? null,
-      body.weightGrams ?? null, body.brand ?? null, body.sellerName ?? null,
-      body.trustedSeller ?? null, body.freeShipping ?? null, body.isFeatured ?? null,
-      body.isFlashDeal ?? null, body.badge ?? null,
-      body.metadata === undefined ? null : JSON.stringify(body.metadata), body.stockQuantity ?? null, productId, companyId]
+      body.weightGrams ?? null, body.brand ?? null, body.trustedSeller ?? null,
+      body.freeShipping ?? null, body.isFeatured ?? null, body.isFlashDeal ?? null,
+      body.badge ?? null, body.metadata === undefined ? null : JSON.stringify(body.metadata),
+      body.stockQuantity ?? null, productId, companyId]
   );
   if (!product) return errorResponse('Product not found', 404);
   return jsonResponse(ok(product, 'Product updated successfully'));
@@ -138,11 +337,17 @@ products.delete('/:companyId/products/:productId', authMiddleware, async (c) => 
   const user = c.get('user'); const companyId = c.req.param('companyId'); const productId = c.req.param('productId'); const db = createDb(c.env);
   const tenant = await requireCompanyTenant(db, companyId, user.id);
   if (tenant.error) return tenant.error;
+  const imageTable = tenantTable(tenant.schema, 'product_images');
+  const imageRows = await db.query(`SELECT id FROM ${imageTable} WHERE product_id = $1`, [productId]);
   const rows = await db.query(
     `DELETE FROM ${tenantTable(tenant.schema, 'products')} WHERE id = $1 AND company_id = $2 RETURNING id`,
     [productId, companyId]
   );
   if (!rows.length) return errorResponse('Product not found', 404);
+  if (c.env.PRODUCT_IMAGES) {
+    const cleanup = await Promise.allSettled(imageRows.map(({ id }) => c.env.PRODUCT_IMAGES.delete(`products/${companyId}/${id}`)));
+    if (cleanup.some((result) => result.status === 'rejected')) console.warn('Some product image objects could not be removed from KV.');
+  }
   return jsonResponse(ok(null, 'Product deleted successfully'));
 });
 

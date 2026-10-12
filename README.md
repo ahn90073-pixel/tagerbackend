@@ -15,6 +15,7 @@ Multi-tenant marketplace API built with Hono on Cloudflare Workers. **All applic
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0005_firebase_google_merchant_auth.sql
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0006_company_profile.sql
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0007_company_profile_document_blobs.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0008_product_images_index.sql
    ```
 
    These migrations are additive and repeatable; they do not drop existing data. They do not copy accounts or other records from the former Supabase database.
@@ -46,9 +47,9 @@ Before enabling the workflow, add these repository **Actions secrets** in GitHub
 | `CLOUDFLARE_API_TOKEN` | A Cloudflare API token scoped to the target account with Workers Scripts edit and the `Workers KV Storage Write` permission group. |
 | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account ID hosting the `tagerbackend` Worker. |
 | `DATABASE_URL` | The Neon PostgreSQL connection string. The workflow sets this as a Cloudflare Worker secret on each deployment. |
-| `JWT_SECRET` | A high-entropy secret used to sign API session tokens. The workflow sets it as a Cloudflare Worker secret on each deployment. |
+| `JWT_SECRET` | A high-entropy secret used to sign API session tokens. The workflow sets this as a Cloudflare Worker secret on each deployment. |
 
-GitHub Actions passes the masked `DATABASE_URL` secret to `psql` to apply migrations `0001_initial.sql` through `0007_company_profile_document_blobs.sql` before deployment. It then sets both `DATABASE_URL` and `JWT_SECRET` as Worker secrets during deployment.
+GitHub Actions passes the masked `DATABASE_URL` secret to `psql` to apply migrations `0001_initial.sql` through `0008_product_images_index.sql` before deployment. It then sets both `DATABASE_URL` and `JWT_SECRET` as Worker secrets during deployment.
 
 The Worker binds the production KV namespace `tager-company-kyc-files`. Its `previews` configuration binds a separate namespace, `tager-company-kyc-files-preview`, so branch previews cannot write KYC files into production. Neon is the source of truth: each document's bytes are saved as `BYTEA` in `public.company_profile_document_blobs`, linked by `document_id` to the company's document metadata. Uploads commit to Neon first, then write an optional KV mirror. Downloads read Neon first; legacy documents without a Neon blob can be fetched from KV and lazily copied into Neon. Missing KV data therefore does not affect downloads once the Neon copy exists. The profile API restricts KYC documents and payout/tax details to active company owners and admins.
 

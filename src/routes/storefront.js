@@ -67,6 +67,43 @@ export function validateCheckoutPayload(body) {
   return errors;
 }
 
+// Public immutable product media URL; image bytes are held in the dedicated KV namespace.
+storefront.get('/media/products/:companyId/:fileName', async (c) => {
+  const companyId = c.req.param('companyId');
+  const fileName = c.req.param('fileName');
+  const match = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(jpg|png|webp)$/i.exec(fileName);
+  if (!uuidPattern.test(companyId) || !match) {
+    return errorResponse('Product image not found', 404);
+  }
+
+  const imagesStore = c.env.PRODUCT_IMAGES;
+  if (!imagesStore) return errorResponse('Product image storage is not configured', 503);
+  const imageId = match[1];
+  let bytes;
+  try {
+    bytes = await imagesStore.get(`products/${companyId}/${imageId}`, { type: 'arrayBuffer' });
+  } catch (error) {
+    console.error('Unable to read product image from KV.', error);
+    return errorResponse('Product image is temporarily unavailable', 503);
+  }
+  if (!bytes) {
+    const response = errorResponse('Product image not found', 404);
+    response.headers.set('Cache-Control', 'no-store');
+    return response;
+  }
+
+  const contentType = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[match[2].toLowerCase()];
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      'Content-Type': contentType,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+    },
+  });
+});
+
 storefront.get('/products', async (c) => {
   const db = createDb(c.env);
   const page = positiveInt(c.req.query('page'), 1, 1000000);
@@ -107,13 +144,16 @@ storefront.get('/products', async (c) => {
         p.free_shipping, p.is_featured, p.is_flash_deal, p.badge,
         p.stock_quantity, COALESCE(NULLIF(p.metadata->>'categoryLabel', ''), cat.name) AS category_name,
         COALESCE(image.url, p.metadata->>'image') AS image_url,
+        COALESCE(image.urls, '[]'::jsonb) AS image_urls,
         p.created_at
       FROM ${products} p
       JOIN public.companies c ON c.id = p.company_id AND c.status = 'active'
       LEFT JOIN ${categories} cat ON cat.id = p.category_id
       LEFT JOIN LATERAL (
-        SELECT url FROM ${images} WHERE product_id = p.id
-        ORDER BY is_primary DESC, sort_order ASC, created_at ASC LIMIT 1
+        SELECT
+          (array_agg(url ORDER BY is_primary DESC, sort_order ASC, created_at ASC))[1] AS url,
+          COALESCE(jsonb_agg(url ORDER BY is_primary DESC, sort_order ASC, created_at ASC), '[]'::jsonb) AS urls
+        FROM ${images} WHERE product_id = p.id
       ) image ON TRUE
       WHERE p.company_id = $${index + 1}::uuid
         AND p.status = 'active'
@@ -131,7 +171,11 @@ storefront.get('/products', async (c) => {
     values,
   );
   const total = rows.length ? rows[0]._total : 0;
-  const items = rows.map((row) => ({
+  const items = rows.map((row) => {
+    const imageUrls = Array.isArray(row.image_urls) && row.image_urls.length
+      ? row.image_urls
+      : row.image_url ? [row.image_url] : [];
+    return ({
     id: row.id,
     vendorId: row.vendor_id,
     vendorName: row.vendor_name,
@@ -152,8 +196,10 @@ storefront.get('/products', async (c) => {
     badge: row.badge || '',
     stockQuantity: Number(row.stock_quantity || 0),
     category: row.category_name || 'عام',
-    imageUrl: row.image_url || '',
-  }));
+    imageUrl: imageUrls[0] || '',
+    images: imageUrls,
+  });
+  });
   return jsonResponse(ok({ items, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } }));
 });
 
