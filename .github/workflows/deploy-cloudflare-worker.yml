@@ -50,6 +50,7 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0004_storefront_checkout.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0005_firebase_google_merchant_auth.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0006_company_profile.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0007_company_profile_document_blobs.sql
 
       - name: Prepare Worker secrets file
         env:
