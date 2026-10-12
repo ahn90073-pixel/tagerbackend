@@ -14,6 +14,7 @@ Multi-tenant marketplace API built with Hono on Cloudflare Workers. **All applic
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0004_storefront_checkout.sql
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0005_firebase_google_merchant_auth.sql
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0006_company_profile.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0007_company_profile_document_blobs.sql
    ```
 
    These migrations are additive and repeatable; they do not drop existing data. They do not copy accounts or other records from the former Supabase database.
@@ -47,11 +48,11 @@ Before enabling the workflow, add these repository **Actions secrets** in GitHub
 | `DATABASE_URL` | The Neon PostgreSQL connection string. The workflow sets this as a Cloudflare Worker secret on each deployment. |
 | `JWT_SECRET` | A high-entropy secret used to sign API session tokens. The workflow sets it as a Cloudflare Worker secret on each deployment. |
 
-GitHub Actions passes the masked `DATABASE_URL` secret to `psql` to apply migrations `0001_initial.sql` through `0006_company_profile.sql` before deployment. It then sets both `DATABASE_URL` and `JWT_SECRET` as Worker secrets during deployment.
+GitHub Actions passes the masked `DATABASE_URL` secret to `psql` to apply migrations `0001_initial.sql` through `0007_company_profile_document_blobs.sql` before deployment. It then sets both `DATABASE_URL` and `JWT_SECRET` as Worker secrets during deployment.
 
-The Worker binds the production KV namespace `tager-company-kyc-files`. Its `previews` configuration binds a separate namespace, `tager-company-kyc-files-preview`, so branch previews cannot write KYC files into production. File bytes are stored as unique KV values and access-controlled metadata is kept in Neon. The profile API restricts KYC documents and payout/tax details to active company owners and admins.
+The Worker binds the production KV namespace `tager-company-kyc-files`. Its `previews` configuration binds a separate namespace, `tager-company-kyc-files-preview`, so branch previews cannot write KYC files into production. Neon is the source of truth: each document's bytes are saved as `BYTEA` in `public.company_profile_document_blobs`, linked by `document_id` to the company's document metadata. Uploads commit to Neon first, then write an optional KV mirror. Downloads read Neon first; legacy documents without a Neon blob can be fetched from KV and lazily copied into Neon. Missing KV data therefore does not affect downloads once the Neon copy exists. The profile API restricts KYC documents and payout/tax details to active company owners and admins.
 
-Workers KV accepts values up to 25 MiB; this API intentionally caps each PDF/JPEG/PNG upload at 10 MiB. KV is eventually consistent, so a newly uploaded file may take 60 seconds or more to become visible from another Cloudflare location. The Free plan includes 1 GB stored data, 100,000 reads/day, 1,000 writes/day, and 1,000 deletes/day. Paid-plan usage above included allowances is billed as described in [KV pricing](https://developers.cloudflare.com/kv/platform/pricing/). See [KV limits](https://developers.cloudflare.com/kv/platform/limits/) and [KV consistency](https://developers.cloudflare.com/kv/concepts/how-kv-works/).
+Each PDF/JPEG/PNG upload is capped at 10 MiB. Neon storage grows by approximately the size of the files retained in the company profile. KV remains an additional mirror and accepts values up to 25 MiB; its cross-location propagation may take 60 seconds or more, but downloads use Neon as the primary copy. The Free plan includes 1 GB stored data, 100,000 reads/day, 1,000 writes/day, and 1,000 deletes/day. Paid-plan usage above included allowances is billed as described in [KV pricing](https://developers.cloudflare.com/kv/platform/pricing/). See [KV limits](https://developers.cloudflare.com/kv/platform/limits/) and [KV consistency](https://developers.cloudflare.com/kv/concepts/how-kv-works/).
 
 User identities, companies, and memberships remain in `public` for authentication; tenant business data is stored in real per-company schemas. `0003_tenant_data_tables.sql` converts the earlier tenant views into tables, migrates existing categories/products, and provisions tables for product media/variants, inventory, customers/addresses, carts, orders/items, payments, shipments, coupons, reviews, wishlists, device tokens, notifications, and audit logs. Legacy `public.categories` and `public.products` rows are retained as a rollback copy; application reads and writes use the tenant tables. New products are always `pending`; the platform-admin moderation API can change them to `active` after approval. `0004_storefront_checkout.sql` adds an atomic public checkout function: it rechecks prices/stock in the database, reserves stock, and creates a separate pending order and shipment in each seller schema. Never place connection strings or Cloudflare tokens in committed workflow files.
 
@@ -77,8 +78,8 @@ User identities, companies, and memberships remain in `public` for authenticatio
 | GET | `/api/companies/:companyId` | Get member-accessible company details |
 | GET | `/api/companies/:companyId/profile` | Read private profile and completion status (active owner/admin only) |
 | PUT | `/api/companies/:companyId/profile` | Save profile fields; omitted values remain unchanged |
-| POST | `/api/companies/:companyId/profile/documents/:documentType` | Upload a PDF/JPEG/PNG document to Worker-bound KV (10 MB limit) |
-| GET | `/api/companies/:companyId/profile/documents/:documentType` | Download an uploaded document (active owner/admin only) |
+| POST | `/api/companies/:companyId/profile/documents/:documentType` | Save a PDF/JPEG/PNG document in Neon and mirror it to KV when available (10 MiB limit) |
+| GET | `/api/companies/:companyId/profile/documents/:documentType` | Download from Neon, with a KV fallback/backfill for legacy records (active owner/admin only) |
 
 ### Products
 

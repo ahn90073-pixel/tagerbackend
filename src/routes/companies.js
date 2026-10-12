@@ -10,6 +10,7 @@ import {
   mergeCompanyProfile,
   validateCompanyProfile,
 } from '../lib/companyProfile.js';
+import { decodeDocumentBytes, encodeDocumentBytes } from '../lib/companyDocumentBlob.js';
 
 const companies = new Hono();
 const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
@@ -153,7 +154,6 @@ companies.post('/:companyId/profile/documents/:documentType', authMiddleware, as
   const denied = await requireCompanyProfileOwner(c, db, companyId);
   if (denied) return denied;
   const documentsStore = c.env.COMPANY_KYC_DOCUMENTS;
-  if (!documentsStore) return errorResponse('Private document storage is not configured', 503);
 
   const contentLength = Number(c.req.header('content-length') || 0);
   if (contentLength > MAX_DOCUMENT_BYTES + 64 * 1024) return errorResponse('Document exceeds the 10 MB limit', 413);
@@ -173,12 +173,9 @@ companies.post('/:companyId/profile/documents/:documentType', authMiddleware, as
     WHERE company_id = ${companyId} AND document_type = ${documentType}
     LIMIT 1
   `;
-
-  await documentsStore.put(storageKey, bytes.buffer, {
-    metadata: { companyId, documentType, uploadedBy: user.id },
-  });
-  try {
-    await db`
+  const base64File = encodeDocumentBytes(bytes);
+  const [savedDocument] = await db`
+    WITH upserted_document AS (
       INSERT INTO public.company_profile_documents
         (company_id, document_type, storage_key, content_type, size_bytes, uploaded_by, uploaded_at)
       VALUES (${companyId}, ${documentType}, ${storageKey}, ${detected.contentType}, ${bytes.byteLength}, ${user.id}, NOW())
@@ -188,26 +185,50 @@ companies.post('/:companyId/profile/documents/:documentType', authMiddleware, as
         size_bytes = EXCLUDED.size_bytes,
         uploaded_by = EXCLUDED.uploaded_by,
         uploaded_at = NOW()
-    `;
-  } catch (error) {
-    await documentsStore.delete(storageKey).catch(() => {});
-    throw error;
-  }
-  const [currentDocument] = await db`
-    SELECT storage_key FROM public.company_profile_documents
-    WHERE company_id = ${companyId} AND document_type = ${documentType}
-    LIMIT 1
+      RETURNING id, storage_key
+    ),
+    upserted_blob AS (
+      INSERT INTO public.company_profile_document_blobs (document_id, file_data)
+      SELECT id, decode(${base64File}, 'base64')
+      FROM upserted_document
+      WHERE TRUE
+      ON CONFLICT (document_id) DO UPDATE SET
+        file_data = EXCLUDED.file_data,
+        updated_at = NOW()
+      RETURNING document_id
+    )
+    SELECT d.id, d.storage_key
+    FROM upserted_document d
+    INNER JOIN upserted_blob b ON b.document_id = d.id
   `;
-  if (currentDocument?.storage_key !== storageKey) {
-    await documentsStore.delete(storageKey).catch(() => console.warn('Unable to remove a superseded company profile upload'));
-  } else if (previous?.storage_key && previous.storage_key !== currentDocument.storage_key) {
-    await documentsStore.delete(previous.storage_key).catch(() => console.warn('Unable to remove replaced company profile document'));
+  if (!savedDocument) throw new Error('Company document could not be persisted in Neon.');
+
+  // Neon is authoritative. KV is only an additional copy and may be unavailable.
+  if (documentsStore) {
+    try {
+      await documentsStore.put(storageKey, bytes.buffer, {
+        metadata: { companyId, documentType, uploadedBy: user.id },
+      });
+    } catch (error) {
+      console.warn('Company document is saved in Neon, but its KV mirror could not be written.', error);
+    }
+
+    const [currentDocument] = await db`
+      SELECT storage_key FROM public.company_profile_documents
+      WHERE company_id = ${companyId} AND document_type = ${documentType}
+      LIMIT 1
+    `;
+    if (currentDocument?.storage_key !== storageKey) {
+      await documentsStore.delete(storageKey).catch(() => console.warn('Unable to remove a superseded company profile upload'));
+    } else if (previous?.storage_key && previous.storage_key !== currentDocument.storage_key) {
+      await documentsStore.delete(previous.storage_key).catch(() => console.warn('Unable to remove replaced company profile document'));
+    }
   }
   const profile = await loadCompanyProfile(db, companyId);
-  return jsonResponse(ok(profile, 'Company document uploaded privately'));
+  return jsonResponse(ok(profile, 'Company document saved to Neon with an optional KV mirror'));
 });
 
-// GET /api/companies/:companyId/profile/documents/:documentType — authenticated private download.
+// GET /api/companies/:companyId/profile/documents/:documentType — authenticated Neon-first download.
 companies.get('/:companyId/profile/documents/:documentType', authMiddleware, async (c) => {
   const companyId = c.req.param('companyId');
   const documentType = c.req.param('documentType');
@@ -216,14 +237,32 @@ companies.get('/:companyId/profile/documents/:documentType', authMiddleware, asy
   const denied = await requireCompanyProfileOwner(c, db, companyId);
   if (denied) return denied;
   const documentsStore = c.env.COMPANY_KYC_DOCUMENTS;
-  if (!documentsStore) return errorResponse('Private document storage is not configured', 503);
   const [document] = await db`
-    SELECT storage_key, content_type FROM public.company_profile_documents
-    WHERE company_id = ${companyId} AND document_type = ${documentType}
+    SELECT d.id, d.storage_key, d.content_type, encode(b.file_data, 'base64') AS file_data_base64
+    FROM public.company_profile_documents d
+    LEFT JOIN public.company_profile_document_blobs b ON b.document_id = d.id
+    WHERE d.company_id = ${companyId} AND d.document_type = ${documentType}
     LIMIT 1
   `;
   if (!document) return errorResponse('Company document not found', 404);
-  const bytes = await documentsStore.get(document.storage_key, { type: 'arrayBuffer', cacheTtl: 30 });
+  let bytes = document.file_data_base64 ? decodeDocumentBytes(document.file_data_base64) : null;
+  if (!bytes && documentsStore) {
+    try {
+      const legacyBytes = await documentsStore.get(document.storage_key, { type: 'arrayBuffer', cacheTtl: 30 });
+      if (legacyBytes) {
+        bytes = new Uint8Array(legacyBytes);
+        const legacyBase64 = encodeDocumentBytes(bytes);
+        // Lazily backfill documents uploaded before the Neon blob migration.
+        await db`
+          INSERT INTO public.company_profile_document_blobs (document_id, file_data)
+          VALUES (${document.id}, decode(${legacyBase64}, 'base64'))
+          ON CONFLICT (document_id) DO NOTHING
+        `;
+      }
+    } catch (error) {
+      console.warn('Unable to retrieve or backfill a legacy KV company document.', error);
+    }
+  }
   if (!bytes) return errorResponse('Stored company document not found', 404);
   const headers = new Headers();
   headers.set('Content-Type', document.content_type);
