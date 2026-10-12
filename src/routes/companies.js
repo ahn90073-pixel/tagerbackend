@@ -11,6 +11,7 @@ import {
   validateCompanyProfile,
 } from '../lib/companyProfile.js';
 import { decodeDocumentBytes, encodeDocumentBytes } from '../lib/companyDocumentBlob.js';
+import { normalizeGovernorate } from '../lib/governorates.js';
 
 const companies = new Hono();
 const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
@@ -23,6 +24,7 @@ const createCompanySchema = (body) => {
   if (!isString(body.legalName)) errors.push({ field: 'legalName', message: 'Legal name is required' });
   if (!isString(body.displayName)) errors.push({ field: 'displayName', message: 'Display name is required' });
   if (body.email && !isEmail(body.email)) errors.push({ field: 'email', message: 'A valid email is required' });
+  if (!normalizeGovernorate(body.governorate)) errors.push({ field: 'governorate', message: 'اختر محافظة صحيحة للمتجر.' });
   return { valid: errors.length === 0, errors };
 };
 
@@ -67,7 +69,7 @@ companies.post('/', authMiddleware, validate(createCompanySchema), async (c) => 
   try {
     const [createdCompany] = await db`
       SELECT public.create_company_with_owner(
-        ${body.slug}, ${body.legalName}, ${body.displayName}, ${user.id}, ${body.email || null}
+        ${body.slug}, ${body.legalName}, ${body.displayName}, ${user.id}, ${body.email || null}, ${normalizeGovernorate(body.governorate)}
       ) AS company_id
     `;
     const [company] = await db`
@@ -86,12 +88,39 @@ companies.get('/', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = createDb(c.env);
   const rows = await db`
-    SELECT c.id, c.slug, c.legal_name, c.display_name, c.email, c.status, c.created_at, c.updated_at,
+    SELECT c.id, c.slug, c.legal_name, c.display_name, c.email, c.governorate, c.status, c.created_at, c.updated_at,
            cm.role, cm.is_active AS membership_active
     FROM companies c JOIN company_members cm ON cm.company_id = c.id
     WHERE cm.user_id = ${user.id} AND cm.is_active = TRUE ORDER BY c.created_at DESC
   `;
   return jsonResponse(ok(rows));
+});
+
+// PATCH /api/companies/:companyId/governorate — one-time completion for stores without a location.
+companies.patch('/:companyId/governorate', authMiddleware, async (c) => {
+  const companyId = c.req.param('companyId');
+  if (!matches(companyId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) {
+    return errorResponse('معرّف المتجر غير صالح.', 400);
+  }
+  const body = await c.req.json().catch(() => null);
+  const governorate = normalizeGovernorate(body?.governorate);
+  if (!governorate) return errorResponse('اختر محافظة صحيحة من القائمة.', 400);
+
+  const db = createDb(c.env);
+  const denied = await requireCompanyProfileOwner(c, db, companyId);
+  if (denied) return denied;
+  const [existing] = await db`SELECT governorate FROM public.companies WHERE id = ${companyId} LIMIT 1`;
+  if (!existing) return errorResponse('Company not found', 404);
+  if (existing.governorate && existing.governorate !== governorate) {
+    return errorResponse('لا يمكن تغيير محافظة المتجر بعد اعتمادها. تواصل مع إدارة المنصة عند الحاجة إلى تصحيحها.', 409);
+  }
+  const [updated] = await db`
+    UPDATE public.companies SET governorate = ${governorate}, updated_at = NOW()
+    WHERE id = ${companyId} AND (governorate IS NULL OR governorate = ${governorate})
+    RETURNING id, governorate
+  `;
+  if (!updated) return errorResponse('تعذر حفظ محافظة المتجر. أعد المحاولة.', 409);
+  return jsonResponse(ok(updated, 'تم حفظ محافظة المتجر.'));
 });
 
 // GET /api/companies/:companyId/profile — sensitive company data is owner/admin-only.

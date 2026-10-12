@@ -6,6 +6,7 @@ import { createToken } from '../lib/jwt.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { validate, isEmail, isString } from '../middleware/validate.js';
 import { verifyFirebaseGoogleIdToken } from '../lib/firebaseAuth.js';
+import { normalizeGovernorate } from '../lib/governorates.js';
 
 const auth = new Hono();
 const registerSchema = (body) => {
@@ -63,8 +64,7 @@ auth.post('/login', validate(loginSchema), async (c) => {
   return jsonResponse(ok({ user, token }, 'Login successful'));
 });
 
-// POST /api/auth/google — verify a Firebase Google ID token, then atomically
-// create/link the Neon user, owner membership, company, and tenant schema.
+// POST /api/auth/google — verify Firebase identity and create/link the merchant.
 auth.post('/google', async (c) => {
   const body = await c.req.json().catch(() => null);
   if (typeof body?.idToken !== 'string' || !body.idToken || body.idToken.length > 12_000) {
@@ -72,10 +72,14 @@ auth.post('/google', async (c) => {
   }
   const storeName = typeof body.storeName === 'string' ? body.storeName.trim() : '';
   const phone = typeof body.phone === 'string' ? body.phone.trim() : '';
+  const rawGovernorate = typeof body.governorate === 'string' ? body.governorate.trim() : '';
+  const governorate = rawGovernorate ? normalizeGovernorate(rawGovernorate) : null;
   if (storeName && (storeName.length < 2 || storeName.length > 120)) {
     return errorResponse('اسم المتجر يجب أن يكون بين حرفين و120 حرفًا.', 400);
   }
   if (phone.length > 20) return errorResponse('رقم الهاتف غير صالح.', 400);
+  if (rawGovernorate && !governorate) return errorResponse('اختر محافظة صحيحة من القائمة.', 400);
+  if (storeName && !governorate) return errorResponse('اختيار محافظة المتجر مطلوب لإكمال التسجيل.', 400);
 
   let identity;
   try {
@@ -93,9 +97,10 @@ auth.post('/google', async (c) => {
     .replace(/^-|-$/g, '').slice(0, 40);
   const companySlug = slugBase ? `${slugBase}-${suffix}` : `merchant-${suffix}`;
 
+  const db = createDb(c.env);
   let registration;
   try {
-    [registration] = await createDb(c.env)`
+    [registration] = await db`
       SELECT * FROM public.register_firebase_google_merchant(
         ${identity.uid}, ${identity.email}, ${identity.fullName || null},
         ${phone || null}, ${storeName || null}, ${companySlug}
@@ -118,6 +123,17 @@ auth.post('/google', async (c) => {
   if (!registration?.out_user_id || !registration?.out_company_id) {
     throw new Error('Firebase merchant registration did not return its account and company.');
   }
+  let storedGovernorate = null;
+  if (governorate) {
+    const [location] = await db.query(
+      `UPDATE public.companies SET governorate = COALESCE(governorate, $2), updated_at = NOW()
+       WHERE id = $1::uuid AND (governorate IS NULL OR governorate = $2)
+       RETURNING governorate`,
+      [registration.out_company_id, governorate],
+    );
+    if (!location) return errorResponse('لا يمكن تغيير محافظة متجر مسجلة بالفعل. تواصل مع إدارة المنصة لتصحيح الموقع.', 409);
+    storedGovernorate = location.governorate;
+  }
   const user = {
     id: registration.out_user_id,
     email: registration.out_email,
@@ -129,6 +145,7 @@ auth.post('/google', async (c) => {
     id: registration.out_company_id,
     slug: registration.out_company_slug,
     display_name: registration.out_company_display_name,
+    governorate: storedGovernorate,
   };
   const token = await createToken(user, c.env.JWT_SECRET);
   return jsonResponse(ok({ user, token, company }, 'تم تسجيل الدخول وإنشاء مساحة المتجر بنجاح.'));
