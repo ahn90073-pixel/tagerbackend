@@ -2,6 +2,8 @@ import { Hono } from 'hono';
 import { createDb } from '../lib/db.js';
 import { ok, jsonResponse, errorResponse } from '../lib/response.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { tenantTable } from '../lib/tenantDb.js';
+import { calculateWalletSummary } from '../lib/financialSummary.js';
 import {
   COMPANY_PROFILE_DOCUMENT_TYPES,
   detectCompanyDocumentType,
@@ -272,6 +274,67 @@ companies.get('/:companyId/profile/documents/:documentType', authMiddleware, asy
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Content-Security-Policy', "default-src 'none'; sandbox");
   return new Response(bytes, { status: 200, headers });
+});
+
+// GET /api/companies/:companyId/wallet — owner/admin view using the same
+// sales, commission and completed-payout model as the Mange admin dashboard.
+companies.get('/:companyId/wallet', authMiddleware, async (c) => {
+  const companyId = c.req.param('companyId');
+  const db = createDb(c.env);
+  const denied = await requireCompanyProfileOwner(c, db, companyId);
+  if (denied) return denied;
+  const [company] = await db`
+    SELECT c.id, c.tenant_schema_name, c.currency,
+           COALESCE(settings.commission_type, 'percentage') AS commission_type,
+           COALESCE(settings.commission_value, 0)::numeric AS commission_value
+    FROM public.companies c
+    LEFT JOIN public.admin_company_settings settings ON settings.company_id = c.id
+    WHERE c.id = ${companyId}
+    LIMIT 1
+  `;
+  if (!company) return errorResponse('Company not found', 404);
+  const ordersTable = tenantTable(company.tenant_schema_name, 'orders');
+  const [sales] = await db.query(
+    `SELECT COALESCE(SUM(grand_total), 0)::numeric AS total_sales
+       FROM ${ordersTable}
+      WHERE company_id = $1::uuid AND status NOT IN ('cancelled', 'refunded')`,
+    [companyId],
+  );
+  const [payouts] = await db.query(
+    `SELECT COALESCE(SUM(net_amount) FILTER (WHERE status = 'completed'), 0)::numeric AS settled_amount
+       FROM public.admin_settlements WHERE company_id = $1::uuid`,
+    [companyId],
+  );
+  const settlements = await db.query(
+    `SELECT id, amount::numeric AS amount, commission_amount::numeric AS commission_deducted,
+            net_amount::numeric AS net_amount, currency, period, paid_at, created_at, status, method, reference
+       FROM public.admin_settlements
+      WHERE company_id = $1::uuid AND status <> 'void'
+      ORDER BY created_at DESC LIMIT 50`,
+    [companyId],
+  );
+  const summary = calculateWalletSummary({
+    totalSales: sales?.total_sales || 0,
+    commissionType: company.commission_type,
+    commissionValue: company.commission_value,
+    settledAmount: payouts?.settled_amount || 0,
+  });
+  return jsonResponse(ok({
+    ...summary,
+    currency: company.currency?.trim() || c.env.DEFAULT_CURRENCY || 'EGP',
+    settlements: settlements.map((row) => ({
+      id: row.id,
+      amount: Number(row.amount || 0),
+      commissionDeducted: Number(row.commission_deducted || 0),
+      netAmount: Number(row.net_amount || 0),
+      currency: row.currency?.trim() || company.currency?.trim() || c.env.DEFAULT_CURRENCY || 'EGP',
+      period: row.period,
+      date: row.paid_at || row.created_at,
+      status: row.status,
+      method: row.method,
+      reference: row.reference,
+    })),
+  }));
 });
 
 // GET /api/companies/:companyId — company access is available to active members.
