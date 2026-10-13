@@ -284,7 +284,7 @@ companies.get('/:companyId/wallet', authMiddleware, async (c) => {
   const denied = await requireCompanyProfileOwner(c, db, companyId);
   if (denied) return denied;
   const [company] = await db`
-    SELECT c.id, c.tenant_schema_name, c.currency,
+    SELECT c.id, c.tenant_schema_name,
            COALESCE(settings.commission_type, 'percentage') AS commission_type,
            COALESCE(settings.commission_value, 0)::numeric AS commission_value
     FROM public.companies c
@@ -321,13 +321,13 @@ companies.get('/:companyId/wallet', authMiddleware, async (c) => {
   });
   return jsonResponse(ok({
     ...summary,
-    currency: company.currency?.trim() || c.env.DEFAULT_CURRENCY || 'EGP',
+    currency: c.env.DEFAULT_CURRENCY || 'EGP',
     settlements: settlements.map((row) => ({
       id: row.id,
       amount: Number(row.amount || 0),
       commissionDeducted: Number(row.commission_deducted || 0),
       netAmount: Number(row.net_amount || 0),
-      currency: row.currency?.trim() || company.currency?.trim() || c.env.DEFAULT_CURRENCY || 'EGP',
+      currency: row.currency?.trim() || c.env.DEFAULT_CURRENCY || 'EGP',
       period: row.period,
       date: row.paid_at || row.created_at,
       status: row.status,
