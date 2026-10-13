@@ -3,6 +3,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import authRoutes from './routes/auth.js';
 import companyRoutes from './routes/companies.js';
+import storeRequestRoutes from './routes/storeRequests.js';
 import productRoutes from './routes/products.js';
 import orderRoutes from './routes/orders.js';
 import storefrontRoutes from './routes/storefront.js';
@@ -26,6 +27,7 @@ app.get('/health', (c) => {
 // ---- API routes ----
 app.route('/api/auth', authRoutes);
 app.route('/api/companies', companyRoutes);
+app.route('/api/merchant/store-requests', storeRequestRoutes);
 app.route('/api/companies', productRoutes);
 app.route('/api/companies', orderRoutes);
 app.route('/api/storefront', storefrontRoutes);

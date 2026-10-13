@@ -6,7 +6,6 @@ import { createToken } from '../lib/jwt.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { validate, isEmail, isString } from '../middleware/validate.js';
 import { verifyFirebaseGoogleIdToken } from '../lib/firebaseAuth.js';
-import { normalizeGovernorate } from '../lib/governorates.js';
 
 const auth = new Hono();
 const registerSchema = (body) => {
@@ -64,22 +63,14 @@ auth.post('/login', validate(loginSchema), async (c) => {
   return jsonResponse(ok({ user, token }, 'Login successful'));
 });
 
-// POST /api/auth/google — verify Firebase identity and create/link the merchant.
+// POST /api/auth/google — verify Firebase identity and create/link only the user.
 auth.post('/google', async (c) => {
   const body = await c.req.json().catch(() => null);
   if (typeof body?.idToken !== 'string' || !body.idToken || body.idToken.length > 12_000) {
     return errorResponse('بيانات تسجيل Google غير صالحة.', 400);
   }
-  const storeName = typeof body.storeName === 'string' ? body.storeName.trim() : '';
   const phone = typeof body.phone === 'string' ? body.phone.trim() : '';
-  const rawGovernorate = typeof body.governorate === 'string' ? body.governorate.trim() : '';
-  const governorate = rawGovernorate ? normalizeGovernorate(rawGovernorate) : null;
-  if (storeName && (storeName.length < 2 || storeName.length > 120)) {
-    return errorResponse('اسم المتجر يجب أن يكون بين حرفين و120 حرفًا.', 400);
-  }
-  if (phone.length > 20) return errorResponse('رقم الهاتف غير صالح.', 400);
-  if (rawGovernorate && !governorate) return errorResponse('اختر محافظة صحيحة من القائمة.', 400);
-  if (storeName && !governorate) return errorResponse('اختيار محافظة المتجر مطلوب لإكمال التسجيل.', 400);
+  if (phone.length > 30) return errorResponse('رقم الهاتف غير صالح.', 400);
 
   let identity;
   try {
@@ -91,26 +82,17 @@ auth.post('/google', async (c) => {
   }
   if (!identity) return errorResponse('يجب استخدام حساب Google ببريد مؤكّد.', 401);
 
-  const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 5);
-  const slugBase = storeName.normalize('NFKD').toLowerCase()
-    .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '').slice(0, 40);
-  const companySlug = slugBase ? `${slugBase}-${suffix}` : `merchant-${suffix}`;
-
   const db = createDb(c.env);
   let registration;
   try {
     [registration] = await db`
       SELECT * FROM public.register_firebase_google_merchant(
         ${identity.uid}, ${identity.email}, ${identity.fullName || null},
-        ${phone || null}, ${storeName || null}, ${companySlug}
+        ${phone || null}, ${null}, ${null}
       )
     `;
   } catch (error) {
     const message = String(error?.message || '');
-    if (message.includes('STORE_NAME_REQUIRED')) {
-      return errorResponse('لإنشاء حساب تاجر جديد، أدخل اسم المتجر ثم اختر المتابعة باستخدام Google.', 400);
-    }
     if (message.includes('FIREBASE_UID_LINKED') || message.includes('EMAIL_LINKED_TO_ANOTHER_FIREBASE_ACCOUNT')) {
       return errorResponse('هذا البريد مرتبط بهوية Google مختلفة. استخدم الحساب المرتبط أو تواصل مع إدارة المنصة.', 409);
     }
@@ -120,20 +102,7 @@ auth.post('/google', async (c) => {
     throw error;
   }
 
-  if (!registration?.out_user_id || !registration?.out_company_id) {
-    throw new Error('Firebase merchant registration did not return its account and company.');
-  }
-  let storedGovernorate = null;
-  if (governorate) {
-    const [location] = await db.query(
-      `UPDATE public.companies SET governorate = COALESCE(governorate, $2), updated_at = NOW()
-       WHERE id = $1::uuid AND (governorate IS NULL OR governorate = $2)
-       RETURNING governorate`,
-      [registration.out_company_id, governorate],
-    );
-    if (!location) return errorResponse('لا يمكن تغيير محافظة متجر مسجلة بالفعل. تواصل مع إدارة المنصة لتصحيح الموقع.', 409);
-    storedGovernorate = location.governorate;
-  }
+  if (!registration?.out_user_id) throw new Error('Firebase merchant registration did not return its account.');
   const user = {
     id: registration.out_user_id,
     email: registration.out_email,
@@ -141,14 +110,16 @@ auth.post('/google', async (c) => {
     phone: registration.out_phone,
     is_platform_admin: registration.out_is_platform_admin,
   };
-  const company = {
+  const company = registration.out_company_id ? {
     id: registration.out_company_id,
     slug: registration.out_company_slug,
     display_name: registration.out_company_display_name,
-    governorate: storedGovernorate,
-  };
+    tenant_schema_name: registration.out_tenant_schema_name,
+  } : null;
   const token = await createToken(user, c.env.JWT_SECRET);
-  return jsonResponse(ok({ user, token, company }, 'تم تسجيل الدخول وإنشاء مساحة المتجر بنجاح.'));
+  return jsonResponse(ok({ user, token, company }, company
+    ? 'تم تسجيل الدخول إلى متجرك.'
+    : 'تم تسجيل الدخول. أكمل طلب إنشاء المتجر لإرساله إلى الإدارة للمراجعة.'));
 });
 
 // GET /api/auth/me

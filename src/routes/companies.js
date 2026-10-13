@@ -1,8 +1,7 @@
 import { Hono } from 'hono';
 import { createDb } from '../lib/db.js';
-import { ok, created, jsonResponse, errorResponse } from '../lib/response.js';
+import { ok, jsonResponse, errorResponse } from '../lib/response.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { validate, isEmail, isString, matches } from '../middleware/validate.js';
 import {
   COMPANY_PROFILE_DOCUMENT_TYPES,
   detectCompanyDocumentType,
@@ -16,17 +15,6 @@ import { normalizeGovernorate } from '../lib/governorates.js';
 const companies = new Hono();
 const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 const documentExtensions = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png' };
-
-const createCompanySchema = (body) => {
-  const errors = [];
-  if (!isString(body.slug) || !matches(body.slug, /^[a-z0-9-]+$/)) errors.push({ field: 'slug', message: 'Slug must contain only lowercase letters, numbers, and hyphens' });
-  if (body.slug && (body.slug.length < 3 || body.slug.length > 50)) errors.push({ field: 'slug', message: 'Slug must be between 3 and 50 characters' });
-  if (!isString(body.legalName)) errors.push({ field: 'legalName', message: 'Legal name is required' });
-  if (!isString(body.displayName)) errors.push({ field: 'displayName', message: 'Display name is required' });
-  if (body.email && !isEmail(body.email)) errors.push({ field: 'email', message: 'A valid email is required' });
-  if (!normalizeGovernorate(body.governorate)) errors.push({ field: 'governorate', message: 'اختر محافظة صحيحة للمتجر.' });
-  return { valid: errors.length === 0, errors };
-};
 
 async function requireCompanyProfileOwner(c, db, companyId) {
   const user = c.get('user');
@@ -61,27 +49,11 @@ async function loadCompanyProfile(db, companyId) {
   return { company, documents, completion: getCompanyProfileCompletion(company, documents) };
 }
 
-// POST /api/companies — atomically create the company and its owner membership.
-companies.post('/', authMiddleware, validate(createCompanySchema), async (c) => {
-  const body = c.get('body');
-  const user = c.get('user');
-  const db = createDb(c.env);
-  try {
-    const [createdCompany] = await db`
-      SELECT public.create_company_with_owner(
-        ${body.slug}, ${body.legalName}, ${body.displayName}, ${user.id}, ${body.email || null}, ${normalizeGovernorate(body.governorate)}
-      ) AS company_id
-    `;
-    const [company] = await db`
-      SELECT * FROM public.companies WHERE id = ${createdCompany.company_id} LIMIT 1
-    `;
-    if (!company) throw new Error('Company creation completed without returning the company record.');
-    return jsonResponse(created(company, 'Company created successfully'), 201);
-  } catch (error) {
-    if (error.code === '23505') return errorResponse('A company with this slug already exists', 409);
-    throw error;
-  }
-});
+// Company creation is intentionally unavailable to merchant sessions. The
+// company and tenant schema are provisioned atomically by admin approval only.
+companies.post('/', authMiddleware, (c) => errorResponse(
+  'يجب إرسال طلب إنشاء متجر وانتظار موافقة الإدارة قبل تفعيل المتجر.', 403,
+));
 
 // GET /api/companies — companies accessible to the authenticated user.
 companies.get('/', authMiddleware, async (c) => {
