@@ -2,6 +2,9 @@ import { Hono } from 'hono';
 import { createDb } from '../lib/db.js';
 import { errorResponse, jsonResponse, ok } from '../lib/response.js';
 import { tenantTable } from '../lib/tenantDb.js';
+import { normalizeEgyptPhone } from '../lib/phone.js';
+import { sendFcmMessage } from '../lib/fcm.js';
+import { upsertCustomerNotificationContact } from '../lib/notificationContacts.js';
 
 const storefront = new Hono();
 const tenantSchemaPattern = /^tenant_[a-z0-9_]{1,54}$/;
@@ -25,7 +28,7 @@ export function validateCheckoutPayload(body) {
     if (typeof customer.fullName !== 'string' || customer.fullName.trim().length < 2 || customer.fullName.length > 120) {
       errors.push('اسم العميل مطلوب (2 إلى 120 حرفًا).');
     }
-    if (typeof customer.phone !== 'string' || !/^[+\d\s()\-]{7,24}$/.test(customer.phone.trim())) {
+    if (typeof customer.phone !== 'string' || !normalizeEgyptPhone(customer.phone)) {
       errors.push('رقم هاتف صالح مطلوب.');
     }
     if (customer.email && (typeof customer.email !== 'string' || customer.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email))) {
@@ -63,6 +66,21 @@ export function validateCheckoutPayload(body) {
 
   if (body.customerNote !== undefined && (typeof body.customerNote !== 'string' || body.customerNote.length > 1000)) {
     errors.push('ملاحظات الطلب غير صالحة.');
+  }
+  if (body.notificationConsent !== undefined && typeof body.notificationConsent !== 'boolean') {
+    errors.push('موافقة الإشعارات غير صالحة.');
+  }
+  if (body.fcmToken !== undefined && (typeof body.fcmToken !== 'string' || body.fcmToken.trim().length < 1 || body.fcmToken.length > 4096)) {
+    errors.push('رمز الإشعارات غير صالح.');
+  }
+  if (body.platform !== undefined && (typeof body.platform !== 'string' || !['android', 'ios', 'web'].includes(body.platform))) {
+    errors.push('منصة الإشعارات غير صالحة.');
+  }
+  if (body.appVersion !== undefined && (typeof body.appVersion !== 'string' || body.appVersion.trim().length > 64)) {
+    errors.push('إصدار التطبيق غير صالح.');
+  }
+  if (body.notificationConsent === true && (!body.fcmToken || !body.platform)) {
+    errors.push('رمز ومنصة الإشعارات مطلوبان عند الموافقة.');
   }
   return errors;
 }
@@ -208,14 +226,24 @@ storefront.post('/checkout', async (c) => {
   const validationErrors = validateCheckoutPayload(body);
   if (validationErrors.length) return errorResponse('يرجى مراجعة بيانات الطلب.', 400, validationErrors);
 
+  const normalizedBody = {
+    ...body,
+    customer: { ...body.customer, phone: normalizeEgyptPhone(body.customer.phone) },
+  };
+
   try {
     const db = createDb(c.env);
     const [row] = await db.query(
       'SELECT public.create_storefront_orders($1::jsonb) AS orders',
-      [JSON.stringify(body)],
+      [JSON.stringify(normalizedBody)],
     );
     const orders = row?.orders || [];
-    await notifyMerchantUsers(db, orders, body);
+    await saveCustomerContacts(db, orders, normalizedBody).catch(() => {
+      console.warn('Checkout succeeded, but notification contact persistence failed.');
+    });
+    await notifyMerchantUsers(db, orders, normalizedBody, c.env).catch(() => {
+      console.warn('Checkout succeeded, but merchant notification delivery failed.');
+    });
     return jsonResponse(createdResponse(orders), 201);
   } catch (error) {
     if (error?.code === '22023') return errorResponse('بيانات الطلب أو التاجر غير صالحة.', 400);
@@ -226,7 +254,27 @@ storefront.post('/checkout', async (c) => {
   }
 });
 
-async function notifyMerchantUsers(db, orders, payload) {
+async function saveCustomerContacts(db, orders, payload) {
+  const token = payload.notificationConsent === true ? payload.fcmToken.trim() : null;
+  const platform = token ? payload.platform : null;
+  const appVersion = token ? (payload.appVersion?.trim() || null) : null;
+  for (const order of orders) {
+    try {
+      await upsertCustomerNotificationContact(db, {
+        companyId: order.vendorId,
+        phone: payload.customer.phone,
+        token,
+        platform,
+        appVersion,
+        consent: payload.notificationConsent === true,
+      });
+    } catch {
+      console.warn('A customer notification contact could not be persisted.');
+    }
+  }
+}
+
+async function notifyMerchantUsers(db, orders, payload, env) {
   const customerName = String(payload?.customer?.fullName || 'عميل جديد').trim();
   for (const order of orders) {
     const [company] = await db.query(
@@ -248,6 +296,27 @@ async function notifyMerchantUsers(db, orders, payload) {
        WHERE cm.company_id = $1 AND cm.is_active = TRUE`,
       [order.vendorId, 'طلب شراء جديد', `استلم متجرك طلبًا جديدًا ${order.orderNumber} من ${customerName}.`, data],
     );
+
+    const merchantContacts = await db.query(
+      `SELECT fcm_token FROM public.notification_contacts
+        WHERE audience = 'merchant' AND company_id = $1
+          AND push_enabled = TRUE AND fcm_token IS NOT NULL`,
+      [order.vendorId],
+    );
+    for (const contact of merchantContacts) {
+      try {
+        await sendFcmMessage({
+          env,
+          token: contact.fcm_token,
+          appName: 'taget',
+          title: 'طلب شراء جديد',
+          body: `استلم متجرك طلبًا جديدًا ${order.orderNumber}.`,
+          data: { type: 'new_order', orderId: order.orderId, orderNumber: order.orderNumber },
+        });
+      } catch {
+        console.warn('A merchant FCM notification could not be delivered.');
+      }
+    }
   }
 }
 

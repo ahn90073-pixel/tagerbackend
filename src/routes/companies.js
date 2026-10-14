@@ -2,8 +2,10 @@ import { Hono } from 'hono';
 import { createDb } from '../lib/db.js';
 import { ok, jsonResponse, errorResponse } from '../lib/response.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { tenantTable } from '../lib/tenantDb.js';
+import { requireCompanyTenant, tenantTable } from '../lib/tenantDb.js';
 import { calculateWalletSummary } from '../lib/financialSummary.js';
+import { upsertMerchantNotificationToken } from '../lib/notificationContacts.js';
+import { normalizeEgyptPhone } from '../lib/phone.js';
 import {
   COMPANY_PROFILE_DOCUMENT_TYPES,
   detectCompanyDocumentType,
@@ -335,6 +337,38 @@ companies.get('/:companyId/wallet', authMiddleware, async (c) => {
       reference: row.reference,
     })),
   }));
+});
+
+// POST /api/companies/:companyId/notifications/token — register a merchant app token.
+companies.post('/:companyId/notifications/token', authMiddleware, async (c) => {
+  const companyId = c.req.param('companyId');
+  const user = c.get('user');
+  let body;
+  try { body = await c.req.json(); } catch { return errorResponse('A JSON notification token body is required', 400); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return errorResponse('Notification token body is invalid', 400);
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  const platform = body.platform;
+  const appVersion = body.appVersion === undefined ? null : body.appVersion;
+  if (!token || token.length > 4096) return errorResponse('A valid notification token is required', 400);
+  if (!['android', 'ios', 'web'].includes(platform)) return errorResponse('A valid notification platform is required', 400);
+  if (appVersion !== null && (typeof appVersion !== 'string' || appVersion.trim().length > 64)) {
+    return errorResponse('Application version is invalid', 400);
+  }
+
+  const db = createDb(c.env);
+  const tenant = await requireCompanyTenant(db, companyId, user.id);
+  if (tenant.error) return tenant.error;
+  const [merchant] = await db.query('SELECT phone FROM public.users WHERE id = $1 LIMIT 1', [user.id]);
+  if (!merchant) return errorResponse('Authenticated user was not found', 401);
+  const contact = await upsertMerchantNotificationToken(db, {
+    companyId,
+    userId: user.id,
+    phone: normalizeEgyptPhone(merchant.phone) || null,
+    token,
+    platform,
+    appVersion: appVersion?.trim() || null,
+  });
+  return jsonResponse(ok(contact, 'Notification token registered'));
 });
 
 // GET /api/companies/:companyId — company access is available to active members.
