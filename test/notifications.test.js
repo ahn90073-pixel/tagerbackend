@@ -45,3 +45,10 @@ test('notification migration declares public idempotent objects and ready shipme
   assert.match(migration, /audience = 'customer'.*whatsapp_phone IS NOT NULL/is);
   assert.match(tenantMigration, /status IN \('pending', 'ready', 'label_created'/i);
 });
+
+test('customer device-token migration permits pre-checkout registration and deduplicates device tokens', () => {
+  const migration = readFileSync(new URL('../migrations/0013_unlinked_customer_notification_tokens.sql', import.meta.url), 'utf8');
+  assert.match(migration, /ALTER COLUMN company_id DROP NOT NULL/i);
+  assert.match(migration, /audience = 'customer' AND \(company_id IS NULL OR whatsapp_phone IS NOT NULL\)/i);
+  assert.match(migration, /notification_contacts_customer_device_token_uq/i);
+});

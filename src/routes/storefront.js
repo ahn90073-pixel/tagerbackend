@@ -4,7 +4,7 @@ import { errorResponse, jsonResponse, ok } from '../lib/response.js';
 import { tenantTable } from '../lib/tenantDb.js';
 import { normalizeEgyptPhone } from '../lib/phone.js';
 import { sendFcmMessage } from '../lib/fcm.js';
-import { upsertCustomerNotificationContact } from '../lib/notificationContacts.js';
+import { upsertCustomerDeviceNotificationToken, upsertCustomerNotificationContact } from '../lib/notificationContacts.js';
 
 const storefront = new Hono();
 const tenantSchemaPattern = /^tenant_[a-z0-9_]{1,54}$/;
@@ -219,6 +219,23 @@ storefront.get('/products', async (c) => {
   });
   });
   return jsonResponse(ok({ items, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } }));
+});
+
+storefront.post('/notifications/token', async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const token = typeof body?.token === 'string' ? body.token.trim() : '';
+  const platform = body?.platform;
+  const appVersion = body?.appVersion;
+  if (!token || token.length > 4096) return errorResponse('رمز الإشعارات غير صالح.', 400);
+  if (!['android', 'ios', 'web'].includes(platform)) return errorResponse('منصة الإشعارات غير صالحة.', 400);
+  if (appVersion !== undefined && (typeof appVersion !== 'string' || appVersion.trim().length > 64)) {
+    return errorResponse('إصدار التطبيق غير صالح.', 400);
+  }
+  const db = createDb(c.env);
+  const contact = await upsertCustomerDeviceNotificationToken(db, {
+    token, platform, appVersion: appVersion?.trim() || null,
+  });
+  return jsonResponse(ok({ registered: Boolean(contact?.id) }, 'تم حفظ توكن الإشعارات.'));
 });
 
 storefront.post('/checkout', async (c) => {
