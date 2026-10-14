@@ -5,6 +5,23 @@ export async function hashNotificationToken(token) {
   return fcmInternals.base64UrlEncode(digest);
 }
 
+export async function upsertCustomerDeviceNotificationToken(db, { token, platform, appVersion = null }) {
+  const tokenHash = await hashNotificationToken(token);
+  const [contact] = await db.query(
+    `INSERT INTO public.notification_contacts
+      (audience, app_name, company_id, fcm_token, token_hash, platform, app_version, push_enabled, last_seen_at)
+     VALUES ('customer', 'online-store', NULL, $1, $2, $3, $4, TRUE, NOW())
+     ON CONFLICT (token_hash)
+       WHERE audience = 'customer' AND company_id IS NULL AND token_hash IS NOT NULL
+     DO UPDATE SET fcm_token = EXCLUDED.fcm_token, platform = EXCLUDED.platform,
+                   app_version = EXCLUDED.app_version, push_enabled = TRUE,
+                   last_seen_at = NOW(), updated_at = NOW()
+     RETURNING id`,
+    [token, tokenHash, platform, appVersion],
+  );
+  return contact;
+}
+
 export async function upsertCustomerNotificationContact(db, {
   companyId, phone, token = null, platform = null, appVersion = null, consent = false,
 }) {
