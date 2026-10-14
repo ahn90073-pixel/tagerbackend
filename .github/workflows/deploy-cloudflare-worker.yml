@@ -60,15 +60,18 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          FCM_SERVICE_ACCOUNT_JSON: ${{ secrets.FCM_SERVICE_ACCOUNT_JSON }}
+          FCM_PUBLIC_SERVICE_ACCOUNT_JSON: ${{ secrets.FCM_PUBLIC_SERVICE_ACCOUNT_JSON }}
         run: |
           node <<'NODE'
           const fs = require('node:fs');
           const keys = ['DATABASE_URL', 'JWT_SECRET'];
-          const missing = keys.filter((key) => !process.env[key]);
+          const fcmKeys = ['FCM_SERVICE_ACCOUNT_JSON', 'FCM_PUBLIC_SERVICE_ACCOUNT_JSON'];
+          const missing = [...keys, ...fcmKeys].filter((key) => !process.env[key]);
           if (missing.length) {
             throw new Error(`Missing required deployment secret(s): ${missing.join(', ')}`);
           }
-          const values = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+          const values = Object.fromEntries([...keys, ...fcmKeys].map((key) => [key, process.env[key]]));
           fs.writeFileSync('/tmp/tagerbackend-worker-secrets.json', JSON.stringify(values), { mode: 0o600 });
           NODE
 
