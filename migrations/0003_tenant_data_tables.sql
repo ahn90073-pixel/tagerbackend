@@ -299,7 +299,7 @@ BEGIN
       order_id UUID NOT NULL UNIQUE REFERENCES %I.orders(id) ON DELETE CASCADE,
       carrier TEXT,
       tracking_number TEXT,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'label_created', 'picked_up', 'in_transit', 'delivered', 'failed', 'returned')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'ready', 'label_created', 'picked_up', 'in_transit', 'delivered', 'failed', 'returned')),
       shipping_address JSONB NOT NULL DEFAULT '{}'::jsonb,
       shipped_at TIMESTAMPTZ,
       delivered_at TIMESTAMPTZ,
