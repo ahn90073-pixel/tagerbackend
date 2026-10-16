@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { normalizeEgyptPhone } from '../src/lib/phone.js';
 import { encodeJwtPart, fcmInternals } from '../src/lib/fcm.js';
-import { validateCheckoutPayload } from '../src/routes/storefront.js';
+import { getCloudflareLocation, validateCheckoutPayload } from '../src/routes/storefront.js';
 
 function decodeBase64Url(value) {
   const padded = `${value.replace(/-/g, '+').replace(/_/g, '/')}${'='.repeat((4 - value.length % 4) % 4)}`;
@@ -16,6 +16,25 @@ test('normalizes Egyptian local mobile numbers to E.164', () => {
   assert.equal(normalizeEgyptPhone('00201012345678'), '+201012345678');
   assert.equal(normalizeEgyptPhone('01112345678'), '+201112345678');
   assert.equal(normalizeEgyptPhone('02012345678'), null);
+});
+
+test('extracts only bounded city, region, and country labels from Cloudflare metadata', () => {
+  assert.deepEqual(getCloudflareLocation({ cf: {
+    city: ' Cairo ', region: 'Cairo Governorate', country: 'eg', ip: '203.0.113.1', latitude: '30.0', longitude: '31.2',
+  } }), {
+    locationCity: 'Cairo', locationRegion: 'Cairo Governorate', locationCountry: 'EG',
+    locationLatitude: 30, locationLongitude: 31.2,
+  });
+  assert.deepEqual(getCloudflareLocation({ cf: { city: 'x'.repeat(120), country: 'Egypt' } }), {
+    locationCity: 'x'.repeat(100), locationRegion: null, locationCountry: null,
+    locationLatitude: null, locationLongitude: null,
+  });
+  assert.deepEqual(getCloudflareLocation({}), {
+    locationCity: null, locationRegion: null, locationCountry: null,
+    locationLatitude: null, locationLongitude: null,
+  });
+  assert.equal(getCloudflareLocation({ cf: { latitude: '91', longitude: '-181' } }).locationLatitude, null);
+  assert.equal(getCloudflareLocation({ cf: { latitude: '91', longitude: '-181' } }).locationLongitude, null);
 });
 
 test('encodes JWT parts as URL-safe JSON and keeps FCM data string-only', () => {
@@ -51,4 +70,15 @@ test('customer device-token migration permits pre-checkout registration and dedu
   assert.match(migration, /ALTER COLUMN company_id DROP NOT NULL/i);
   assert.match(migration, /audience = 'customer' AND \(company_id IS NULL OR whatsapp_phone IS NOT NULL\)/i);
   assert.match(migration, /notification_contacts_customer_device_token_uq/i);
+});
+
+test('customer IP-location migration enables PostGIS and stores an approximate spatial point', () => {
+  const migration = readFileSync(new URL('../migrations/0014_notification_contact_ip_location.sql', import.meta.url), 'utf8');
+  assert.match(migration, /CREATE EXTENSION IF NOT EXISTS postgis/i);
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS location_city TEXT/i);
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS location_region TEXT/i);
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS location_country TEXT/i);
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS location_point geography\(Point, 4326\)/i);
+  assert.match(migration, /USING GIST \(location_point\)/i);
+  assert.doesNotMatch(migration, /ip_address|latitude|longitude/i);
 });
