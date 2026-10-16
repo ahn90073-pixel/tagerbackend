@@ -3,8 +3,6 @@ import { createDb } from '../lib/db.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { errorResponse, jsonResponse, ok } from '../lib/response.js';
 import { requireCompanyTenant, tenantTable } from '../lib/tenantDb.js';
-import { sendFcmMessage } from '../lib/fcm.js';
-import { normalizeEgyptPhone } from '../lib/phone.js';
 
 const orders = new Hono();
 const allowedStatuses = new Set(['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'returned', 'refunded']);
@@ -69,76 +67,9 @@ orders.get('/:companyId/orders', authMiddleware, async (c) => {
   }));
 });
 
-// POST /api/companies/:companyId/orders/:orderId/ready — mark a parcel ready once.
-orders.post('/:companyId/orders/:orderId/ready', authMiddleware, async (c) => {
-  const user = c.get('user');
-  const companyId = c.req.param('companyId');
-  const orderId = c.req.param('orderId');
-  const db = createDb(c.env);
-  const tenant = await requireCompanyTenant(db, companyId, user.id);
-  if (tenant.error) return tenant.error;
-  const orderTable = tenantTable(tenant.schema, 'orders');
-  const shipmentTable = tenantTable(tenant.schema, 'shipments');
-  const customerTable = tenantTable(tenant.schema, 'customers');
-  const [order] = await db.query(
-    `SELECT o.id, o.order_number, o.status AS order_status, c.phone AS customer_phone,
-            s.status AS shipment_status
-       FROM ${orderTable} o
-       LEFT JOIN ${customerTable} c ON c.id = o.customer_id
-       LEFT JOIN ${shipmentTable} s ON s.order_id = o.id
-      WHERE o.id = $1::uuid AND o.company_id = $2::uuid
-      LIMIT 1`,
-    [orderId, companyId],
-  );
-  if (!order) return errorResponse('Order not found', 404);
-  if (['cancelled', 'delivered', 'shipped', 'returned', 'refunded'].includes(order.order_status)
-      || ['delivered', 'in_transit', 'picked_up'].includes(order.shipment_status)) {
-    return errorResponse('This order cannot be marked ready', 409);
-  }
-  if (order.shipment_status === 'ready') {
-    return jsonResponse(ok({ orderId: order.id, shipmentStatus: 'ready' }, 'Shipment is already ready'));
-  }
-
-  const [updated] = await db.query(
-    `UPDATE ${shipmentTable} s
-        SET status = 'ready', updated_at = NOW()
-       FROM ${orderTable} o
-      WHERE s.order_id = o.id AND o.id = $1::uuid AND o.company_id = $2::uuid
-        AND o.status NOT IN ('cancelled', 'delivered', 'shipped')
-        AND s.status NOT IN ('ready', 'delivered', 'in_transit', 'picked_up')
-      RETURNING s.order_id`,
-    [orderId, companyId],
-  );
-  if (!updated) {
-    const [current] = await db.query(`SELECT status FROM ${shipmentTable} WHERE order_id = $1::uuid LIMIT 1`, [orderId]);
-    if (current?.status === 'ready') return jsonResponse(ok({ orderId, shipmentStatus: 'ready' }, 'Shipment is already ready'));
-    return errorResponse('Shipment could not be marked ready', 409);
-  }
-
-  const phone = normalizeEgyptPhone(order.customer_phone);
-  if (phone) {
-    const contacts = await db.query(
-      `SELECT fcm_token FROM public.notification_contacts
-        WHERE audience = 'customer' AND company_id = $1 AND whatsapp_phone = $2
-          AND push_enabled = TRUE AND fcm_token IS NOT NULL`,
-      [companyId, phone],
-    );
-    for (const contact of contacts) {
-      try {
-        await sendFcmMessage({
-          env: c.env,
-          token: contact.fcm_token,
-          appName: 'online-store',
-          title: 'تم تجهيز طردك',
-          body: `تم تجهيز طلبك ${order.order_number} للشحن.`,
-          data: { type: 'shipment_ready', orderId: order.id, orderNumber: order.order_number },
-        });
-      } catch {
-        console.warn('Shipment status updated, but a customer FCM notification failed.');
-      }
-    }
-  }
-  return jsonResponse(ok({ orderId: order.id, shipmentStatus: 'ready' }, 'Shipment marked ready'));
-});
+// Legacy merchant action is retained only to direct older app versions to the admin workflow.
+orders.post('/:companyId/orders/:orderId/ready', authMiddleware, async () => (
+  errorResponse('تم نقل تجهيز الطرد وإشعار العميل إلى تطبيق الإدارة.', 403)
+));
 
 export default orders;

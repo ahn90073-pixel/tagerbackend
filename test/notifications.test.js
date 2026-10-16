@@ -5,6 +5,8 @@ import { normalizeEgyptPhone } from '../src/lib/phone.js';
 import { encodeJwtPart, fcmInternals } from '../src/lib/fcm.js';
 import { validateCheckoutPayload } from '../src/routes/storefront.js';
 
+const merchantOrderRoutes = readFileSync(new URL('../src/routes/orders.js', import.meta.url), 'utf8');
+
 function decodeBase64Url(value) {
   const padded = `${value.replace(/-/g, '+').replace(/_/g, '/')}${'='.repeat((4 - value.length % 4) % 4)}`;
   return Buffer.from(padded, 'base64').toString('utf8');
@@ -51,4 +53,10 @@ test('customer device-token migration permits pre-checkout registration and dedu
   assert.match(migration, /ALTER COLUMN company_id DROP NOT NULL/i);
   assert.match(migration, /audience = 'customer' AND \(company_id IS NULL OR whatsapp_phone IS NOT NULL\)/i);
   assert.match(migration, /notification_contacts_customer_device_token_uq/i);
+});
+
+test('merchant order API delegates shipment preparation to Mange without accessing customer push tokens', () => {
+  assert.match(merchantOrderRoutes, /تم نقل تجهيز الطرد وإشعار العميل إلى تطبيق الإدارة/);
+  assert.match(merchantOrderRoutes, /errorResponse\([\s\S]*?, 403\)/);
+  assert.doesNotMatch(merchantOrderRoutes, /notification_contacts|sendFcmMessage|shipment_ready/);
 });
