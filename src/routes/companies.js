@@ -6,6 +6,7 @@ import { requireCompanyTenant, tenantTable } from '../lib/tenantDb.js';
 import { calculateWalletSummary } from '../lib/financialSummary.js';
 import { upsertMerchantNotificationToken } from '../lib/notificationContacts.js';
 import { normalizeEgyptPhone } from '../lib/phone.js';
+import { getApproximateCloudflareLocation } from '../lib/cloudflareLocation.js';
 import {
   COMPANY_PROFILE_DOCUMENT_TYPES,
   detectCompanyDocumentType,
@@ -360,6 +361,11 @@ companies.post('/:companyId/notifications/token', authMiddleware, async (c) => {
   if (tenant.error) return tenant.error;
   const [merchant] = await db.query('SELECT phone FROM public.users WHERE id = $1 LIMIT 1', [user.id]);
   if (!merchant) return errorResponse('Authenticated user was not found', 401);
+  const [company] = await db.query(
+    `SELECT COALESCE(NULLIF(BTRIM(display_name), ''), NULLIF(BTRIM(legal_name), '')) AS company_name
+       FROM public.companies WHERE id = $1 LIMIT 1`,
+    [companyId],
+  );
   const contact = await upsertMerchantNotificationToken(db, {
     companyId,
     userId: user.id,
@@ -367,6 +373,8 @@ companies.post('/:companyId/notifications/token', authMiddleware, async (c) => {
     token,
     platform,
     appVersion: appVersion?.trim() || null,
+    companyName: company?.company_name || null,
+    location: getApproximateCloudflareLocation(c.req.raw?.cf),
   });
   return jsonResponse(ok(contact, 'Notification token registered'));
 });
