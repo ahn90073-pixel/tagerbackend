@@ -20,12 +20,19 @@ export function getCloudflareLocation(request) {
   const clean = (value, maxLength) => typeof value === 'string'
     ? value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, maxLength) || null
     : null;
+  const coordinate = (value, min, max) => {
+    if ((typeof value !== 'string' && typeof value !== 'number') || String(value).trim() === '') return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : null;
+  };
   const countryValue = typeof cf.country === 'string' ? cf.country.trim() : '';
   const country = /^[A-Z]{2}$/i.test(countryValue) ? countryValue.toUpperCase() : null;
   return {
     locationCity: clean(cf.city, 100),
     locationRegion: clean(cf.region, 100),
     locationCountry: country,
+    locationLatitude: coordinate(cf.latitude, -90, 90),
+    locationLongitude: coordinate(cf.longitude, -180, 180),
   };
 }
 

@@ -7,13 +7,18 @@ export async function hashNotificationToken(token) {
 
 export async function upsertCustomerDeviceNotificationToken(db, {
   token, platform, appVersion = null, locationCity = null, locationRegion = null, locationCountry = null,
+  locationLatitude = null, locationLongitude = null,
 }) {
   const tokenHash = await hashNotificationToken(token);
   const [contact] = await db.query(
     `INSERT INTO public.notification_contacts
       (audience, app_name, company_id, fcm_token, token_hash, platform, app_version,
-       location_city, location_region, location_country, push_enabled, last_seen_at)
-     VALUES ('customer', 'online-store', NULL, $1, $2, $3, $4, $5, $6, $7, TRUE, NOW())
+       location_city, location_region, location_country, location_point, push_enabled, last_seen_at)
+     VALUES ('customer', 'online-store', NULL, $1, $2, $3, $4, $5, $6, $7,
+       CASE WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
+         THEN ST_SetSRID(ST_MakePoint($9::double precision, $8::double precision), 4326)::geography
+         ELSE NULL END,
+       TRUE, NOW())
      ON CONFLICT (token_hash)
        WHERE audience = 'customer' AND company_id IS NULL AND token_hash IS NOT NULL
      DO UPDATE SET fcm_token = EXCLUDED.fcm_token, platform = EXCLUDED.platform,
@@ -21,10 +26,11 @@ export async function upsertCustomerDeviceNotificationToken(db, {
                    location_city = COALESCE(EXCLUDED.location_city, notification_contacts.location_city),
                    location_region = COALESCE(EXCLUDED.location_region, notification_contacts.location_region),
                    location_country = COALESCE(EXCLUDED.location_country, notification_contacts.location_country),
+                   location_point = COALESCE(EXCLUDED.location_point, notification_contacts.location_point),
                    push_enabled = TRUE,
                    last_seen_at = NOW(), updated_at = NOW()
      RETURNING id`,
-    [token, tokenHash, platform, appVersion, locationCity, locationRegion, locationCountry],
+    [token, tokenHash, platform, appVersion, locationCity, locationRegion, locationCountry, locationLatitude, locationLongitude],
   );
   return contact;
 }
