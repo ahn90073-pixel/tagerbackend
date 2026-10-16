@@ -5,19 +5,26 @@ export async function hashNotificationToken(token) {
   return fcmInternals.base64UrlEncode(digest);
 }
 
-export async function upsertCustomerDeviceNotificationToken(db, { token, platform, appVersion = null }) {
+export async function upsertCustomerDeviceNotificationToken(db, {
+  token, platform, appVersion = null, locationCity = null, locationRegion = null, locationCountry = null,
+}) {
   const tokenHash = await hashNotificationToken(token);
   const [contact] = await db.query(
     `INSERT INTO public.notification_contacts
-      (audience, app_name, company_id, fcm_token, token_hash, platform, app_version, push_enabled, last_seen_at)
-     VALUES ('customer', 'online-store', NULL, $1, $2, $3, $4, TRUE, NOW())
+      (audience, app_name, company_id, fcm_token, token_hash, platform, app_version,
+       location_city, location_region, location_country, push_enabled, last_seen_at)
+     VALUES ('customer', 'online-store', NULL, $1, $2, $3, $4, $5, $6, $7, TRUE, NOW())
      ON CONFLICT (token_hash)
        WHERE audience = 'customer' AND company_id IS NULL AND token_hash IS NOT NULL
      DO UPDATE SET fcm_token = EXCLUDED.fcm_token, platform = EXCLUDED.platform,
-                   app_version = EXCLUDED.app_version, push_enabled = TRUE,
+                   app_version = EXCLUDED.app_version,
+                   location_city = COALESCE(EXCLUDED.location_city, notification_contacts.location_city),
+                   location_region = COALESCE(EXCLUDED.location_region, notification_contacts.location_region),
+                   location_country = COALESCE(EXCLUDED.location_country, notification_contacts.location_country),
+                   push_enabled = TRUE,
                    last_seen_at = NOW(), updated_at = NOW()
      RETURNING id`,
-    [token, tokenHash, platform, appVersion],
+    [token, tokenHash, platform, appVersion, locationCity, locationRegion, locationCountry],
   );
   return contact;
 }

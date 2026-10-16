@@ -15,6 +15,20 @@ function positiveInt(value, fallback, max) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
 }
 
+export function getCloudflareLocation(request) {
+  const cf = request?.cf || {};
+  const clean = (value, maxLength) => typeof value === 'string'
+    ? value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, maxLength) || null
+    : null;
+  const countryValue = typeof cf.country === 'string' ? cf.country.trim() : '';
+  const country = /^[A-Z]{2}$/i.test(countryValue) ? countryValue.toUpperCase() : null;
+  return {
+    locationCity: clean(cf.city, 100),
+    locationRegion: clean(cf.region, 100),
+    locationCountry: country,
+  };
+}
+
 export function validateCheckoutPayload(body) {
   const errors = [];
   if (!body || typeof body !== 'object' || Array.isArray(body)) return ['بيانات الطلب غير صالحة.'];
@@ -232,8 +246,10 @@ storefront.post('/notifications/token', async (c) => {
     return errorResponse('إصدار التطبيق غير صالح.', 400);
   }
   const db = createDb(c.env);
+  const location = getCloudflareLocation(c.req.raw);
   const contact = await upsertCustomerDeviceNotificationToken(db, {
     token, platform, appVersion: appVersion?.trim() || null,
+    ...location,
   });
   return jsonResponse(ok({ registered: Boolean(contact?.id) }, 'تم حفظ توكن الإشعارات.'));
 });
