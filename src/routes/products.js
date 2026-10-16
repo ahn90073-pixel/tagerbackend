@@ -5,6 +5,7 @@ import { authMiddleware, requireAdmin } from '../middleware/auth.js';
 import { validate, isString, isNonNegativeNumber, isUUID } from '../middleware/validate.js';
 import { slugify } from '../lib/slugify.js';
 import { requireCompanyTenant, tenantTable } from '../lib/tenantDb.js';
+import { cloudinaryConfigState, uploadProductImage } from '../lib/cloudinary.js';
 import {
   decodeProductImageDataUrl,
   detectProductImageType,
@@ -98,6 +99,89 @@ async function readProductCreatePayload(c) {
   return { body, files: entries };
 }
 
+async function prepareProductImages(c, companyId, productName, imageSources) {
+  if (!imageSources.length) return { images: [] };
+  if (imageSources.length > MAX_PRODUCT_IMAGES) {
+    return { error: { message: `A product can have at most ${MAX_PRODUCT_IMAGES} images`, status: 400 } };
+  }
+
+  const cloudinaryState = cloudinaryConfigState(c.env);
+  if (cloudinaryState === 'partial') {
+    return { error: { message: 'Cloudinary image storage is only partially configured', status: 503 } };
+  }
+  const useCloudinary = cloudinaryState === 'ready';
+  if (!useCloudinary && !c.env.PRODUCT_IMAGES) {
+    return { error: { message: 'Product image storage is not configured', status: 503 } };
+  }
+
+  const images = [];
+  for (const source of imageSources) {
+    let bytes;
+    let detected;
+    if (source.legacy) {
+      bytes = source.legacy.bytes;
+      detected = source.legacy;
+    } else {
+      if (source.file.size <= 0 || source.file.size > MAX_PRODUCT_IMAGE_BYTES) {
+        return { error: { message: 'Each product image must be between 1 byte and 5 MB', status: 413 } };
+      }
+      bytes = new Uint8Array(await source.file.arrayBuffer());
+      detected = detectProductImageType(bytes);
+      if (!detected) return { error: { message: 'Only real JPEG, PNG, or WebP images are accepted', status: 415 } };
+      if (source.file.type && source.file.type !== 'application/octet-stream' && source.file.type !== detected.contentType) {
+        return { error: { message: 'Image content does not match its declared file type', status: 415 } };
+      }
+    }
+    if (bytes.byteLength <= 0 || bytes.byteLength > MAX_PRODUCT_IMAGE_BYTES) {
+      return { error: { message: 'Each product image must be between 1 byte and 5 MB', status: 413 } };
+    }
+    const id = crypto.randomUUID();
+    images.push({
+      id,
+      key: `products/${companyId}/${id}`,
+      url: '',
+      contentType: detected.contentType,
+      extension: detected.extension,
+      bytes,
+      altText: productName,
+      sortOrder: images.length,
+      isPrimary: images.length === 0,
+      storage: useCloudinary ? 'cloudinary' : 'kv',
+    });
+  }
+
+  try {
+    if (useCloudinary) {
+      for (const image of images) {
+        const result = await uploadProductImage(c.env, {
+          bytes: image.bytes,
+          contentType: image.contentType,
+          extension: image.extension,
+          companyId,
+          imageId: image.id,
+        });
+        image.url = result.secureUrl;
+        image.publicId = result.publicId;
+      }
+    } else {
+      for (const image of images) {
+        image.url = new URL(
+          `/api/storefront/media/products/${encodeURIComponent(companyId)}/${image.id}.${image.extension}`,
+          c.req.url,
+        ).toString();
+        await c.env.PRODUCT_IMAGES.put(image.key, image.bytes.buffer, {
+          metadata: { companyId, imageId: image.id, contentType: image.contentType },
+        });
+      }
+    }
+    return { images };
+  } catch (error) {
+    await Promise.allSettled(images.filter((image) => image.storage === 'kv').map(({ key }) => c.env.PRODUCT_IMAGES.delete(key)));
+    console.error('Unable to store product image.', error);
+    return { error: { message: 'تعذر تخزين صور المنتج الآن. حاول مرة أخرى.', status: 503 } };
+  }
+}
+
 function productImagesJoin(imagesTable) {
   return `LEFT JOIN LATERAL (
     SELECT
@@ -115,7 +199,7 @@ function productImagesJoin(imagesTable) {
 }
 
 // POST /api/companies/:companyId/products — products are created pending moderation.
-// Uploaded image bytes go to PRODUCT_IMAGES KV; Neon stores only stable URL strings.
+// New image uploads use Cloudinary when configured; KV remains the legacy-compatible fallback.
 products.post('/:companyId/products', authMiddleware, async (c) => {
   const parsed = await readProductCreatePayload(c);
   if (parsed.error) return parsed.error;
@@ -151,64 +235,9 @@ products.post('/:companyId/products', authMiddleware, async (c) => {
 
   const imageSources = parsed.files.map((file) => ({ file }));
   if (legacyImage) imageSources.push({ legacy: legacyImage });
-  if (imageSources.length > MAX_PRODUCT_IMAGES) {
-    return errorResponse(`A product can have at most ${MAX_PRODUCT_IMAGES} images`, 400);
-  }
-  if (imageSources.length && !c.env.PRODUCT_IMAGES) {
-    return errorResponse('Product image storage is not configured', 503);
-  }
-
-  const preparedImages = [];
-  for (const source of imageSources) {
-    let bytes;
-    let detected;
-    if (source.legacy) {
-      bytes = source.legacy.bytes;
-      detected = source.legacy;
-    } else {
-      if (source.file.size <= 0 || source.file.size > MAX_PRODUCT_IMAGE_BYTES) {
-        return errorResponse('Each product image must be between 1 byte and 5 MB', 413);
-      }
-      bytes = new Uint8Array(await source.file.arrayBuffer());
-      detected = detectProductImageType(bytes);
-      if (!detected) return errorResponse('Only real JPEG, PNG, or WebP images are accepted', 415);
-      if (source.file.type && source.file.type !== 'application/octet-stream' && source.file.type !== detected.contentType) {
-        return errorResponse('Image content does not match its declared file type', 415);
-      }
-    }
-    if (bytes.byteLength <= 0 || bytes.byteLength > MAX_PRODUCT_IMAGE_BYTES) {
-      return errorResponse('Each product image must be between 1 byte and 5 MB', 413);
-    }
-
-    const id = crypto.randomUUID();
-    const imageUrl = new URL(
-      `/api/storefront/media/products/${encodeURIComponent(companyId)}/${id}.${detected.extension}`,
-      c.req.url,
-    ).toString();
-    preparedImages.push({
-      id,
-      key: `products/${companyId}/${id}`,
-      url: imageUrl,
-      contentType: detected.contentType,
-      extension: detected.extension,
-      bytes,
-      altText: body.name,
-      sortOrder: preparedImages.length,
-      isPrimary: preparedImages.length === 0,
-    });
-  }
-
-  try {
-    for (const image of preparedImages) {
-      await c.env.PRODUCT_IMAGES.put(image.key, image.bytes.buffer, {
-        metadata: { companyId, imageId: image.id, contentType: image.contentType },
-      });
-    }
-  } catch (error) {
-    await Promise.allSettled(preparedImages.map(({ key }) => c.env.PRODUCT_IMAGES.delete(key)));
-    console.error('Unable to store product image in KV.', error);
-    return errorResponse('تعذر تخزين صور المنتج الآن. حاول مرة أخرى.', 503);
-  }
+  const preparedResult = await prepareProductImages(c, companyId, body.name, imageSources);
+  if (preparedResult.error) return errorResponse(preparedResult.error.message, preparedResult.error.status);
+  const preparedImages = preparedResult.images;
 
   if (preparedImages.length) metadata.image = preparedImages[0].url;
   const imagesJson = JSON.stringify(preparedImages.map(({ id, url, altText, sortOrder, isPrimary }) => ({
@@ -258,7 +287,7 @@ products.post('/:companyId/products', authMiddleware, async (c) => {
     if (!product) throw new Error('Product insert returned no row.');
     return jsonResponse(created(product, 'Product created — pending admin approval'), 201);
   } catch (error) {
-    await Promise.allSettled(preparedImages.map(({ key }) => c.env.PRODUCT_IMAGES.delete(key)));
+    await Promise.allSettled(preparedImages.filter((image) => image.storage === 'kv').map(({ key }) => c.env.PRODUCT_IMAGES.delete(key)));
     if (error.code === '23505') return errorResponse('A product with this SKU already exists in your company', 409);
     throw error;
   }
@@ -306,30 +335,93 @@ products.get('/:companyId/products/:productId', authMiddleware, async (c) => {
 });
 
 // PUT /api/companies/:companyId/products/:productId
-products.put('/:companyId/products/:productId', authMiddleware, validate(updateProductSchema), async (c) => {
-  const body = c.get('body'); const user = c.get('user'); const companyId = c.req.param('companyId'); const productId = c.req.param('productId'); const db = createDb(c.env);
+products.put('/:companyId/products/:productId', authMiddleware, async (c) => {
+  const parsed = await readProductCreatePayload(c);
+  if (parsed.error) return parsed.error;
+  const body = parsed.body;
+  const validation = updateProductSchema(body);
+  if (!validation.valid) return errorResponse('Validation failed', 400, validation.errors);
+
+  const user = c.get('user'); const companyId = c.req.param('companyId'); const productId = c.req.param('productId'); const db = createDb(c.env);
   const tenant = await requireCompanyTenant(db, companyId, user.id);
   if (tenant.error) return tenant.error;
-  const [product] = await db.query(
-    `UPDATE ${tenantTable(tenant.schema, 'products')} SET
-      name = COALESCE($1, name), description = COALESCE($2, description),
-      short_description = COALESCE($3, short_description), price = COALESCE($4, price),
-      compare_at_price = COALESCE($5, compare_at_price), cost_price = COALESCE($6, cost_price),
-      weight_grams = COALESCE($7, weight_grams), brand = COALESCE($8, brand),
-      seller_name = COALESCE($9, seller_name), trusted_seller = COALESCE($10, trusted_seller),
-      free_shipping = COALESCE($11, free_shipping), is_featured = COALESCE($12, is_featured),
-      is_flash_deal = COALESCE($13, is_flash_deal), badge = COALESCE($14, badge),
-      metadata = COALESCE($15::jsonb, metadata), stock_quantity = COALESCE($16, stock_quantity), updated_at = now()
-     WHERE id = $17 AND company_id = $18 RETURNING *`,
-    [body.name ?? null, body.description ?? null, body.shortDescription ?? null,
-      body.price ?? null, body.compareAtPrice ?? null, body.costPrice ?? null,
-      body.weightGrams ?? null, body.brand ?? null, body.trustedSeller ?? null,
-      body.freeShipping ?? null, body.isFeatured ?? null, body.isFlashDeal ?? null,
-      body.badge ?? null, body.metadata === undefined ? null : JSON.stringify(body.metadata),
-      body.stockQuantity ?? null, productId, companyId]
+  const productTable = tenantTable(tenant.schema, 'products');
+  const imagesTable = tenantTable(tenant.schema, 'product_images');
+  const [existing] = await db.query(
+    `SELECT id, name, metadata FROM ${productTable} WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [productId, companyId]
   );
-  if (!product) return errorResponse('Product not found', 404);
-  return jsonResponse(ok(product, 'Product updated successfully'));
+  if (!existing) return errorResponse('Product not found', 404);
+
+  const imageSources = parsed.files.map((file) => ({ file }));
+  const preparedResult = await prepareProductImages(c, companyId, body.name || existing.name || '', imageSources);
+  if (preparedResult.error) return errorResponse(preparedResult.error.message, preparedResult.error.status);
+  const preparedImages = preparedResult.images;
+  const currentMetadata = existing.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)
+    ? existing.metadata
+    : {};
+  const nextMetadata = { ...currentMetadata, ...(body.metadata || {}) };
+  if (preparedImages.length) nextMetadata.image = preparedImages[0].url;
+  const metadataJson = body.metadata === undefined && !preparedImages.length ? null : JSON.stringify(nextMetadata);
+
+  try {
+    const [product] = await db.query(
+      `UPDATE ${productTable} SET
+        name = COALESCE($1, name), description = COALESCE($2, description),
+        short_description = COALESCE($3, short_description), price = COALESCE($4, price),
+        compare_at_price = COALESCE($5, compare_at_price), cost_price = COALESCE($6, cost_price),
+        weight_grams = COALESCE($7, weight_grams), brand = COALESCE($8, brand),
+        seller_name = COALESCE($9, seller_name), trusted_seller = COALESCE($10, trusted_seller),
+        free_shipping = COALESCE($11, free_shipping), is_featured = COALESCE($12, is_featured),
+        is_flash_deal = COALESCE($13, is_flash_deal), badge = COALESCE($14, badge),
+        metadata = COALESCE($15::jsonb, metadata), stock_quantity = COALESCE($16, stock_quantity), updated_at = now()
+       WHERE id = $17 AND company_id = $18 RETURNING *`,
+      [body.name ?? null, body.description ?? null, body.shortDescription ?? null,
+        body.price ?? null, body.compareAtPrice ?? null, body.costPrice ?? null,
+        body.weightGrams ?? null, body.brand ?? null, body.sellerName ?? null,
+        body.trustedSeller ?? null, body.freeShipping ?? null, body.isFeatured ?? null,
+        body.isFlashDeal ?? null, body.badge ?? null, metadataJson,
+        body.stockQuantity ?? null, productId, companyId]
+    );
+    if (!product) {
+      await Promise.allSettled(preparedImages.filter((image) => image.storage === 'kv').map(({ key }) => c.env.PRODUCT_IMAGES.delete(key)));
+      return errorResponse('Product not found', 404);
+    }
+
+    if (preparedImages.length) {
+      const imagesJson = JSON.stringify(preparedImages.map(({ id, url, altText, sortOrder, isPrimary }) => ({
+        id, url, alt_text: altText, sort_order: sortOrder, is_primary: isPrimary,
+      })));
+      await db.query(
+        `WITH deleted_images AS (
+           DELETE FROM ${imagesTable} WHERE product_id = $1 RETURNING id
+         ), new_images AS (
+           INSERT INTO ${imagesTable} (id, product_id, url, alt_text, sort_order, is_primary)
+           SELECT image.id::uuid, $1, image.url, image.alt_text, image.sort_order, image.is_primary
+           FROM jsonb_to_recordset($2::jsonb) AS image(
+             id text, url text, alt_text text, sort_order integer, is_primary boolean
+           )
+           CROSS JOIN (SELECT count(*) FROM deleted_images) AS delete_barrier
+           RETURNING id
+         ) SELECT count(*)::int AS inserted_count FROM new_images`,
+        [productId, imagesJson]
+      );
+    }
+
+    const imageJoin = productImagesJoin(imagesTable);
+    const [updatedProduct] = await db.query(
+      `SELECT product.*, product_image_data.images,
+         COALESCE(product_image_data.image_url, product.metadata->>'image') AS image_url
+       FROM ${productTable} product
+       ${imageJoin}
+       WHERE product.id = $1 AND product.company_id = $2 LIMIT 1`,
+      [productId, companyId]
+    );
+    return jsonResponse(ok(updatedProduct, 'Product updated successfully'));
+  } catch (error) {
+    await Promise.allSettled(preparedImages.filter((image) => image.storage === 'kv').map(({ key }) => c.env.PRODUCT_IMAGES.delete(key)));
+    throw error;
+  }
 });
 
 // DELETE /api/companies/:companyId/products/:productId
