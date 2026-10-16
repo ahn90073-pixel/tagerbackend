@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { createDb } from '../lib/db.js';
 import { ok, created, jsonResponse, errorResponse } from '../lib/response.js';
 import { createToken } from '../lib/jwt.js';
+import { createRefreshSession, generateRefreshToken, hashRefreshToken } from '../lib/refreshSessions.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { validate, isEmail, isString } from '../middleware/validate.js';
 import { verifyFirebaseGoogleIdToken } from '../lib/firebaseAuth.js';
@@ -23,6 +24,12 @@ const loginSchema = (body) => {
   return { valid: errors.length === 0, errors };
 };
 
+async function createAuthSession(db, user, secret) {
+  const token = await createToken(user, secret);
+  const refreshToken = await createRefreshSession(db, user.id);
+  return { token, refreshToken };
+}
+
 // POST /api/auth/register — account data is written directly to Neon.
 auth.post('/register', validate(registerSchema), async (c) => {
   const body = c.get('body');
@@ -34,8 +41,8 @@ auth.post('/register', validate(registerSchema), async (c) => {
       VALUES (${body.email.toLowerCase()}, ${passwordHash}, ${body.fullName || null}, ${body.phone || null})
       RETURNING id, email, full_name, phone, is_platform_admin
     `;
-    const token = await createToken(user, c.env.JWT_SECRET);
-    return jsonResponse(created({ user, token }, 'Account created successfully'), 201);
+    const session = await createAuthSession(db, user, c.env.JWT_SECRET);
+    return jsonResponse(created({ user, ...session }, 'Account created successfully'), 201);
   } catch (error) {
     if (error.code === '23505') {
       return errorResponse(String(error.constraint ?? '').includes('phone') ? 'A user with this phone already exists' : 'A user with this email already exists', 409);
@@ -59,8 +66,8 @@ auth.post('/login', validate(loginSchema), async (c) => {
     id: credentials.id, email: credentials.email, full_name: credentials.full_name,
     phone: credentials.phone, is_platform_admin: credentials.is_platform_admin,
   };
-  const token = await createToken(user, c.env.JWT_SECRET);
-  return jsonResponse(ok({ user, token }, 'Login successful'));
+  const session = await createAuthSession(db, user, c.env.JWT_SECRET);
+  return jsonResponse(ok({ user, ...session }, 'Login successful'));
 });
 
 // POST /api/auth/google — verify Firebase identity and create/link only the user.
@@ -116,10 +123,72 @@ auth.post('/google', async (c) => {
     display_name: registration.out_company_display_name,
     tenant_schema_name: registration.out_tenant_schema_name,
   } : null;
-  const token = await createToken(user, c.env.JWT_SECRET);
-  return jsonResponse(ok({ user, token, company }, company
+  const session = await createAuthSession(db, user, c.env.JWT_SECRET);
+  return jsonResponse(ok({ user, ...session, company }, company
     ? 'تم تسجيل الدخول إلى متجرك.'
     : 'تم تسجيل الدخول. أكمل طلب إنشاء المتجر لإرساله إلى الإدارة للمراجعة.'));
+});
+
+// POST /api/auth/refresh — rotate the one-time refresh token and issue a new access token.
+auth.post('/refresh', async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const previousRefreshToken = body?.refreshToken;
+  if (typeof previousRefreshToken !== 'string' || previousRefreshToken.length < 32 || previousRefreshToken.length > 200) {
+    return errorResponse('Refresh token is invalid.', 400);
+  }
+
+  const previousHash = await hashRefreshToken(previousRefreshToken);
+  const refreshToken = generateRefreshToken();
+  const refreshHash = await hashRefreshToken(refreshToken);
+  const db = createDb(c.env);
+  const [user] = await db`
+    WITH rotated AS (
+      UPDATE public.auth_refresh_sessions
+      SET token_hash = ${refreshHash},
+          expires_at = NOW() + INTERVAL '365 days',
+          last_used_at = NOW()
+      WHERE token_hash = ${previousHash}
+        AND revoked_at IS NULL
+        AND expires_at > NOW()
+      RETURNING user_id
+    )
+    SELECT u.id, u.email, u.full_name, u.phone, u.is_platform_admin
+    FROM rotated r
+    JOIN public.users u ON u.id = r.user_id
+    LIMIT 1
+  `;
+  if (!user) return errorResponse('Refresh session expired or revoked.', 401);
+
+  const token = await createToken(user, c.env.JWT_SECRET);
+  return jsonResponse(ok({ user, token, refreshToken }, 'Session refreshed'));
+});
+
+// POST /api/auth/refresh-token — upgrades a valid pre-refresh-token access session once.
+auth.post('/refresh-token', authMiddleware, async (c) => {
+  const db = createDb(c.env);
+  const [user] = await db`
+    SELECT id, email, full_name, phone, is_platform_admin
+    FROM public.users WHERE id = ${c.get('user').id} LIMIT 1
+  `;
+  if (!user) return errorResponse('User not found', 404);
+  const refreshToken = await createRefreshSession(db, user.id);
+  return jsonResponse(ok({ refreshToken }, 'Persistent session created'));
+});
+
+// POST /api/auth/logout — revoke this device's refresh token; access JWTs expire independently.
+auth.post('/logout', async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const refreshToken = body?.refreshToken;
+  if (typeof refreshToken === 'string' && refreshToken.length >= 32 && refreshToken.length <= 200) {
+    const tokenHash = await hashRefreshToken(refreshToken);
+    const db = createDb(c.env);
+    await db`
+      UPDATE public.auth_refresh_sessions
+      SET revoked_at = NOW(), last_used_at = NOW()
+      WHERE token_hash = ${tokenHash} AND revoked_at IS NULL
+    `;
+  }
+  return jsonResponse(ok({ loggedOut: true }, 'Logged out'));
 });
 
 // GET /api/auth/me
