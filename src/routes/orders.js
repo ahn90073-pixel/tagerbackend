@@ -3,7 +3,7 @@ import { createDb } from '../lib/db.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { errorResponse, jsonResponse, ok } from '../lib/response.js';
 import { requireCompanyTenant, tenantTable } from '../lib/tenantDb.js';
-import { isUuid } from '../lib/validation.js';
+import { isUUID } from '../middleware/validate.js';
 
 const orders = new Hono();
 const allowedStatuses = new Set(['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'returned', 'refunded']);
@@ -76,7 +76,7 @@ orders.post('/:companyId/orders/:orderId/activate-shipping', authMiddleware, asy
   const user = c.get('user');
   const companyId = c.req.param('companyId');
   const orderId = c.req.param('orderId');
-  if (!isUuid(companyId) || !isUuid(orderId)) return errorResponse('معرّف المتجر أو الطلب غير صالح.', 400);
+  if (!isUUID(companyId) || !isUUID(orderId)) return errorResponse('معرّف المتجر أو الطلب غير صالح.', 400);
 
   const db = createDb(c.env);
   const tenant = await requireCompanyTenant(db, companyId, user.id);
