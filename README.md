@@ -122,3 +122,8 @@ npm run dev
 - `JWT_SECRET`: JWT signing secret, set as a Cloudflare Worker secret.
 
 No Supabase URL, key, client, SDK, or REST endpoint is used by the application.
+
+
+## كتالوج المنتجات في Cloudflare KV
+
+تُقرأ منتجات الواجهة العامة من `PRODUCT_CATALOG` في Workers KV بدل الاستعلام إلى Neon مع كل طلب. يقوم Cron Trigger (`0 * * * *`, UTC) ببناء snapshot من المنتجات النشطة في جداول المتاجر الحالية داخل Neon، ثم ينشر مؤشر النسخة بعد كتابة جميع الأجزاء. عند غياب أول snapshot يملأه أول طلب تلقائيًا. تحتفظ النسخ القديمة بمدة صلاحية محدودة لتجنّب تراكمها. قائمة المنتجات، والبحث، والتصنيف، والترقيم تستخدم snapshot نفسه؛ يظل Neon مصدر الحقيقة وتظل عمليات الطلبات والتحقق من السعر والمخزون في backend كما هي.

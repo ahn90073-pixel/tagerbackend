@@ -6,7 +6,7 @@ import companyRoutes from './routes/companies.js';
 import storeRequestRoutes from './routes/storeRequests.js';
 import productRoutes from './routes/products.js';
 import orderRoutes from './routes/orders.js';
-import storefrontRoutes from './routes/storefront.js';
+import storefrontRoutes, { refreshProductCatalog } from './routes/storefront.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 
 const app = new Hono();
@@ -40,4 +40,10 @@ app.onError(errorHandler);
 export default {
   port: 3000,
   fetch: app.fetch,
+  scheduled(_event, env, ctx) {
+    ctx.waitUntil(refreshProductCatalog(env).catch((error) => {
+      console.error('Scheduled product catalog refresh failed.', error);
+      throw error;
+    }));
+  },
 };

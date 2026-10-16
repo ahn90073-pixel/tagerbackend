@@ -5,6 +5,7 @@ import { tenantTable } from '../lib/tenantDb.js';
 import { normalizeEgyptPhone } from '../lib/phone.js';
 import { sendFcmMessage } from '../lib/fcm.js';
 import { upsertCustomerDeviceNotificationToken, upsertCustomerNotificationContact } from '../lib/notificationContacts.js';
+import { filterAndPageCatalog, readCatalogSnapshot, writeCatalogSnapshot } from '../lib/productCatalogCache.js';
 
 const storefront = new Hono();
 const tenantSchemaPattern = /^tenant_[a-z0-9_]{1,54}$/;
@@ -122,23 +123,16 @@ storefront.get('/media/products/:companyId/:fileName', async (c) => {
   });
 });
 
-storefront.get('/products', async (c) => {
-  const db = createDb(c.env);
-  const page = positiveInt(c.req.query('page'), 1, 1000000);
-  const limit = positiveInt(c.req.query('limit'), 60, 100);
+async function queryProductsFromNeon(env, { page, limit, search = '', category = '' }) {
+  const db = createDb(env);
   const offset = (page - 1) * limit;
-  const search = (c.req.query('q') || '').trim().slice(0, 120);
-  const category = (c.req.query('category') || '').trim().slice(0, 120);
-
   const companies = await db`
     SELECT id, display_name, slug, tenant_schema_name
     FROM public.companies
     WHERE status = 'active' AND tenant_schema_name IS NOT NULL
     ORDER BY display_name ASC
   `;
-  if (!companies.length) {
-    return jsonResponse(ok({ items: [], pagination: { page, limit, total: 0, totalPages: 0 } }));
-  }
+  if (!companies.length) return { items: [], pagination: { page, limit, total: 0, totalPages: 0 } };
 
   const values = companies.map((company) => company.id);
   values.push(search ? `%${search}%` : null, category || null, limit, offset);
@@ -188,37 +182,76 @@ storefront.get('/products', async (c) => {
      LIMIT ${limitParam} OFFSET ${offsetParam}`,
     values,
   );
-  const total = rows.length ? rows[0]._total : 0;
+  const total = Number(rows[0]?._total || 0);
   const items = rows.map((row) => {
     const imageUrls = Array.isArray(row.image_urls) && row.image_urls.length
       ? row.image_urls
       : row.image_url ? [row.image_url] : [];
-    return ({
-    id: row.id,
-    vendorId: row.vendor_id,
-    vendorName: row.vendor_name,
-    vendorSlug: row.vendor_slug,
-    name: row.name,
-    slug: row.product_slug,
-    description: row.description || row.short_description || '',
-    price: Number(row.price || 0),
-    compareAtPrice: row.compare_at_price === null ? null : Number(row.compare_at_price),
-    currency: row.currency?.trim() || 'EGP',
-    weightGrams: row.weight_grams === null ? null : Number(row.weight_grams),
-    brand: row.brand || '',
-    sellerName: row.seller_name || row.vendor_name,
-    trustedSeller: Boolean(row.trusted_seller),
-    freeShipping: Boolean(row.free_shipping),
-    isFeatured: Boolean(row.is_featured),
-    isFlashDeal: Boolean(row.is_flash_deal),
-    badge: row.badge || '',
-    stockQuantity: Number(row.stock_quantity || 0),
-    category: row.category_name || 'عام',
-    imageUrl: imageUrls[0] || '',
-    images: imageUrls,
+    return {
+      id: row.id,
+      vendorId: row.vendor_id,
+      vendorName: row.vendor_name,
+      vendorSlug: row.vendor_slug,
+      name: row.name,
+      slug: row.product_slug,
+      description: row.description || row.short_description || '',
+      price: Number(row.price || 0),
+      compareAtPrice: row.compare_at_price === null ? null : Number(row.compare_at_price),
+      currency: row.currency?.trim() || 'EGP',
+      weightGrams: row.weight_grams === null ? null : Number(row.weight_grams),
+      brand: row.brand || '',
+      sellerName: row.seller_name || row.vendor_name,
+      trustedSeller: Boolean(row.trusted_seller),
+      freeShipping: Boolean(row.free_shipping),
+      isFeatured: Boolean(row.is_featured),
+      isFlashDeal: Boolean(row.is_flash_deal),
+      badge: row.badge || '',
+      stockQuantity: Number(row.stock_quantity || 0),
+      category: row.category_name || 'عام',
+      imageUrl: imageUrls[0] || '',
+      images: imageUrls,
+    };
   });
-  });
-  return jsonResponse(ok({ items, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } }));
+  return { items, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+}
+
+async function loadCompleteCatalog(env) {
+  const products = [];
+  const pageSize = 1000;
+  for (let page = 1; page <= 10000; page += 1) {
+    const result = await queryProductsFromNeon(env, { page, limit: pageSize });
+    products.push(...result.items);
+    if (page >= result.pagination.totalPages) return products;
+  }
+  throw new Error('Catalog refresh exceeded the 10,000-page safety limit.');
+}
+
+export async function refreshProductCatalog(env) {
+  if (!env.PRODUCT_CATALOG) throw new Error('PRODUCT_CATALOG KV binding is not configured.');
+  const products = await loadCompleteCatalog(env);
+  const manifest = await writeCatalogSnapshot(env.PRODUCT_CATALOG, products);
+  console.info('Product catalog snapshot refreshed.', { productCount: products.length, updatedAt: manifest.updatedAt });
+  return { productCount: products.length, updatedAt: manifest.updatedAt };
+}
+
+storefront.get('/products', async (c) => {
+  const page = positiveInt(c.req.query('page'), 1, 1000000);
+  const limit = positiveInt(c.req.query('limit'), 60, 100);
+  const search = (c.req.query('q') || '').trim().slice(0, 120);
+  const category = (c.req.query('category') || '').trim().slice(0, 120);
+
+  if (!c.env.PRODUCT_CATALOG) {
+    const result = await queryProductsFromNeon(c.env, { page, limit, search, category });
+    return jsonResponse(ok(result));
+  }
+
+  let snapshot = await readCatalogSnapshot(c.env.PRODUCT_CATALOG);
+  if (!snapshot) {
+    const products = await loadCompleteCatalog(c.env);
+    const manifest = await writeCatalogSnapshot(c.env.PRODUCT_CATALOG, products);
+    snapshot = { products, updatedAt: manifest.updatedAt, version: manifest.version };
+  }
+  return jsonResponse(ok(filterAndPageCatalog(snapshot.products, { page, limit, search, category })));
 });
 
 storefront.post('/notifications/token', async (c) => {
