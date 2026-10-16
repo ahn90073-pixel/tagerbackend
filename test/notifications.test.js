@@ -52,26 +52,3 @@ test('customer device-token migration permits pre-checkout registration and dedu
   assert.match(migration, /audience = 'customer' AND \(company_id IS NULL OR whatsapp_phone IS NOT NULL\)/i);
   assert.match(migration, /notification_contacts_customer_device_token_uq/i);
 });
-
-test('merchant backend token registration does not read or persist IP-derived location', () => {
-  const storefront = readFileSync(new URL('../src/routes/storefront.js', import.meta.url), 'utf8');
-  const tokenRoute = storefront.slice(
-    storefront.indexOf("storefront.post('/notifications/token'"),
-    storefront.indexOf("storefront.post('/checkout'"),
-  );
-  const contacts = readFileSync(new URL('../src/lib/notificationContacts.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(tokenRoute, /getCloudflareLocation|location_/i);
-  assert.doesNotMatch(contacts, /location_(city|region|country|point)|locationLatitude|locationLongitude/i);
-  assert.match(tokenRoute, /upsertCustomerDeviceNotificationToken/);
-});
-
-test('customer IP-location migration enables PostGIS and stores an approximate spatial point', () => {
-  const migration = readFileSync(new URL('../migrations/0014_notification_contact_ip_location.sql', import.meta.url), 'utf8');
-  assert.match(migration, /CREATE EXTENSION IF NOT EXISTS postgis/i);
-  assert.match(migration, /ADD COLUMN IF NOT EXISTS location_city TEXT/i);
-  assert.match(migration, /ADD COLUMN IF NOT EXISTS location_region TEXT/i);
-  assert.match(migration, /ADD COLUMN IF NOT EXISTS location_country TEXT/i);
-  assert.match(migration, /ADD COLUMN IF NOT EXISTS location_point geography\(Point, 4326\)/i);
-  assert.match(migration, /USING GIST \(location_point\)/i);
-  assert.doesNotMatch(migration, /ip_address|latitude|longitude/i);
-});

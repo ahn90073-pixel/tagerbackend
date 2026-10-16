@@ -14,8 +14,7 @@ export async function upsertCustomerDeviceNotificationToken(db, { token, platfor
      ON CONFLICT (token_hash)
        WHERE audience = 'customer' AND company_id IS NULL AND token_hash IS NOT NULL
      DO UPDATE SET fcm_token = EXCLUDED.fcm_token, platform = EXCLUDED.platform,
-                   app_version = EXCLUDED.app_version,
-                   push_enabled = TRUE,
+                   app_version = EXCLUDED.app_version, push_enabled = TRUE,
                    last_seen_at = NOW(), updated_at = NOW()
      RETURNING id`,
     [token, tokenHash, platform, appVersion],
