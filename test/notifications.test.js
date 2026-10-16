@@ -60,3 +60,14 @@ test('merchant order API delegates shipment preparation to Mange without accessi
   assert.match(merchantOrderRoutes, /errorResponse\([\s\S]*?, 403\)/);
   assert.doesNotMatch(merchantOrderRoutes, /notification_contacts|sendFcmMessage|shipment_ready/);
 });
+
+test('public checkout creates a complete order without auto-creating shipment, and merchants can request activation', () => {
+  const migration = readFileSync(new URL('../migrations/0016_manual_shipment_activation_requests.sql', import.meta.url), 'utf8');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS public\.shipment_activation_requests/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.create_storefront_orders/);
+  assert.match(migration, /INSERT INTO %I\.orders/);
+  assert.doesNotMatch(migration, /INSERT INTO %I\.shipments/);
+  assert.match(merchantOrderRoutes, /orders\/:[^']*\/activate-shipping/);
+  assert.match(merchantOrderRoutes, /INSERT INTO public\.shipment_activation_requests/);
+  assert.match(merchantOrderRoutes, /request\.status AS shipping_request_status/);
+});
