@@ -58,6 +58,7 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0012_notification_contacts.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0013_unlinked_customer_notification_tokens.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0015_merchant_notification_company_location.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0016_manual_shipment_activation_requests.sql
 
       - name: Prepare Worker secrets file
         env:
