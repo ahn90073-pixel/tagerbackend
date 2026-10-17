@@ -7,6 +7,7 @@ import { createRefreshSession, generateRefreshToken, hashRefreshToken } from '..
 import { authMiddleware } from '../middleware/auth.js';
 import { validate, isEmail, isString } from '../middleware/validate.js';
 import { verifyFirebaseGoogleIdToken } from '../lib/firebaseAuth.js';
+import { ARCHIVED_MERCHANT_MESSAGE, findSuspendedCompany } from '../lib/merchantAccess.js';
 
 const auth = new Hono();
 const registerSchema = (body) => {
@@ -62,6 +63,9 @@ auth.post('/login', validate(loginSchema), async (c) => {
   if (!credentials || !credentials.password_hash || !(await bcrypt.compare(body.password, credentials.password_hash))) {
     return errorResponse('Invalid email or password', 401);
   }
+  if (await findSuspendedCompany(db, credentials.id)) {
+    return errorResponse(ARCHIVED_MERCHANT_MESSAGE, 403);
+  }
   const user = {
     id: credentials.id, email: credentials.email, full_name: credentials.full_name,
     phone: credentials.phone, is_platform_admin: credentials.is_platform_admin,
@@ -110,6 +114,9 @@ auth.post('/google', async (c) => {
   }
 
   if (!registration?.out_user_id) throw new Error('Firebase merchant registration did not return its account.');
+  if (await findSuspendedCompany(db, registration.out_user_id)) {
+    return errorResponse(ARCHIVED_MERCHANT_MESSAGE, 403);
+  }
   const user = {
     id: registration.out_user_id,
     email: registration.out_email,
@@ -141,6 +148,17 @@ auth.post('/refresh', async (c) => {
   const refreshToken = generateRefreshToken();
   const refreshHash = await hashRefreshToken(refreshToken);
   const db = createDb(c.env);
+  const [refreshOwner] = await db`
+    SELECT user_id FROM public.auth_refresh_sessions
+    WHERE token_hash = ${previousHash}
+      AND revoked_at IS NULL
+      AND expires_at > NOW()
+    LIMIT 1
+  `;
+  if (!refreshOwner) return errorResponse('Refresh session expired or revoked.', 401);
+  if (await findSuspendedCompany(db, refreshOwner.user_id)) {
+    return errorResponse(ARCHIVED_MERCHANT_MESSAGE, 403);
+  }
   const [user] = await db`
     WITH rotated AS (
       UPDATE public.auth_refresh_sessions
@@ -166,6 +184,9 @@ auth.post('/refresh', async (c) => {
 // POST /api/auth/refresh-token — upgrades a valid pre-refresh-token access session once.
 auth.post('/refresh-token', authMiddleware, async (c) => {
   const db = createDb(c.env);
+  if (await findSuspendedCompany(db, c.get('user').id)) {
+    return errorResponse(ARCHIVED_MERCHANT_MESSAGE, 403);
+  }
   const [user] = await db`
     SELECT id, email, full_name, phone, is_platform_admin
     FROM public.users WHERE id = ${c.get('user').id} LIMIT 1
@@ -195,6 +216,9 @@ auth.post('/logout', async (c) => {
 auth.get('/me', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = createDb(c.env);
+  if (await findSuspendedCompany(db, user.id)) {
+    return errorResponse(ARCHIVED_MERCHANT_MESSAGE, 403);
+  }
   const [profile] = await db`SELECT id, email, full_name, phone, is_platform_admin, created_at FROM users WHERE id = ${user.id} LIMIT 1`;
   if (!profile) return errorResponse('User not found', 404);
   const companies = await db`
@@ -210,6 +234,9 @@ auth.get('/me', authMiddleware, async (c) => {
 auth.get('/me/companies', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = createDb(c.env);
+  if (await findSuspendedCompany(db, user.id)) {
+    return errorResponse(ARCHIVED_MERCHANT_MESSAGE, 403);
+  }
   const companies = await db`
     SELECT c.id, c.slug, c.legal_name, c.display_name, c.email, c.status, c.created_at, c.updated_at,
            cm.role, cm.is_active AS membership_active
