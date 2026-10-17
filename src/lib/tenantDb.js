@@ -10,7 +10,7 @@ const tenantTables = new Set([
 
 export async function requireCompanyTenant(db, companyId, userId) {
   const [member] = await db`
-    SELECT c.tenant_schema_name, cm.is_active
+    SELECT c.tenant_schema_name, c.status AS company_status, cm.is_active
     FROM public.companies c
     JOIN public.company_members cm ON cm.company_id = c.id
     WHERE c.id = ${companyId} AND cm.user_id = ${userId}
@@ -19,6 +19,9 @@ export async function requireCompanyTenant(db, companyId, userId) {
 
   if (!member) return { error: errorResponse('You do not have access to this company', 403) };
   if (!member.is_active) return { error: errorResponse('Your membership to this company is inactive', 403) };
+  if (member.company_status !== 'active') {
+    return { error: errorResponse('تم إيقاف هذا المتجر أو أرشفته. بياناته محفوظة، وتواصل مع الإدارة لإعادة التفعيل.', 403) };
+  }
   if (!schemaNamePattern.test(member.tenant_schema_name || '')) {
     throw new Error('Company tenant schema is missing or invalid.');
   }
