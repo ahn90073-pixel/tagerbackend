@@ -73,6 +73,36 @@ companies.get('/', authMiddleware, async (c) => {
   return jsonResponse(ok(rows));
 });
 
+// PUT /api/companies/:companyId/location — persist exact merchant location only after explicit consent.
+companies.put('/:companyId/location', authMiddleware, async (c) => {
+  const companyId = c.req.param('companyId');
+  if (!matches(companyId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) return errorResponse('معرّف المتجر غير صالح.', 400);
+  const body = await c.req.json().catch(() => null);
+  const latitude = body?.latitude;
+  const longitude = body?.longitude;
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) return errorResponse('إحداثيات الموقع غير صحيحة.', 400);
+  const db = createDb(c.env);
+  const denied = await requireCompanyProfileOwner(c, db, companyId);
+  if (denied) return denied;
+  const [saved] = await db`
+    UPDATE public.companies SET shipping_location_latitude = ${latitude},
+      shipping_location_longitude = ${longitude}, shipping_location_consent_at = NOW(), updated_at = NOW()
+    WHERE id = ${companyId}
+    RETURNING id, shipping_location_latitude AS latitude, shipping_location_longitude AS longitude, shipping_location_consent_at AS shared_at
+  `;
+  if (!saved) return errorResponse('Company not found', 404);
+  return jsonResponse(ok(saved, 'تم حفظ موقع المتجر بموافقة صاحبه.'));
+});
+// DELETE /api/companies/:companyId/location — revoke location sharing consent.
+companies.delete('/:companyId/location', authMiddleware, async (c) => {
+  const companyId = c.req.param('companyId');
+  const db = createDb(c.env);
+  const denied = await requireCompanyProfileOwner(c, db, companyId);
+  if (denied) return denied;
+  await db`UPDATE public.companies SET shipping_location_latitude = NULL, shipping_location_longitude = NULL, shipping_location_consent_at = NULL, updated_at = NOW() WHERE id = ${companyId}`;
+  return jsonResponse(ok({ companyId }, 'تم حذف موقع المتجر.'));
+});
+
 // PATCH /api/companies/:companyId/governorate — one-time completion for stores without a location.
 companies.patch('/:companyId/governorate', authMiddleware, async (c) => {
   const companyId = c.req.param('companyId');
