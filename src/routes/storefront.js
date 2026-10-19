@@ -6,14 +6,75 @@ import { normalizeEgyptPhone } from '../lib/phone.js';
 import { sendFcmMessage } from '../lib/fcm.js';
 import { upsertCustomerDeviceNotificationToken, upsertCustomerNotificationContact } from '../lib/notificationContacts.js';
 import { filterAndPageCatalog, readCatalogSnapshot, writeCatalogSnapshot } from '../lib/productCatalogCache.js';
+import { cloudinaryConfigState, createCloudinarySignature } from '../lib/cloudinary.js';
 
 const storefront = new Hono();
 const tenantSchemaPattern = /^tenant_[a-z0-9_]{1,54}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const promotionAdminAuthMeFallback = 'https://mangerbackend.ahn90073.workers.dev/api/admin/auth/me';
+const promotionContentTypes = new Map([
+  ['image/jpeg', 'image'],
+  ['image/png', 'image'],
+  ['image/webp', 'image'],
+  ['video/mp4', 'video'],
+  ['video/webm', 'video'],
+]);
 
 function positiveInt(value, fallback, max) {
   const parsed = Number.parseInt(value || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
+}
+
+async function authorizePromotionSuperAdmin(c, fetchImpl) {
+  const authorization = c.req.header('Authorization') || '';
+  if (!/^Bearer\s+\S+$/i.test(authorization)) {
+    return errorResponse('Authentication token is required', 401);
+  }
+
+  const configuredAuthUrl = typeof c.env?.ADMIN_AUTH_ME_URL === 'string' ? c.env.ADMIN_AUTH_ME_URL.trim() : '';
+  let response;
+  try {
+    response = await fetchImpl(configuredAuthUrl || promotionAdminAuthMeFallback, {
+      method: 'GET',
+      headers: { Authorization: authorization },
+    });
+  } catch {
+    return errorResponse('Authentication service is temporarily unavailable.', 503);
+  }
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || payload?.data?.role === undefined) {
+    return errorResponse('Invalid or expired token', 401);
+  }
+  if (payload.data.role !== 'super_admin') {
+    return errorResponse('Super admin access required', 403);
+  }
+  return null;
+}
+
+async function readJsonBody(c) {
+  return c.req.json().catch(() => null);
+}
+
+export function promotionRowToApi(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    subtitle: row.subtitle,
+    description: row.description,
+    ctaLabel: row.cta_label,
+    targetUrl: row.target_url,
+    mediaUrl: row.media_url,
+    mediaKey: row.media_key,
+    mediaType: row.media_type,
+    theme: row.theme,
+    isActive: Boolean(row.is_active),
+    sortOrder: Number(row.sort_order),
+    startsAt: row.starts_at,
+    endsAt: row.ends_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 export function validateCheckoutPayload(body) {
@@ -252,6 +313,105 @@ storefront.get('/products', async (c) => {
     snapshot = { products, updatedAt: manifest.updatedAt, version: manifest.version };
   }
   return jsonResponse(ok(filterAndPageCatalog(snapshot.products, { page, limit, search, category })));
+});
+
+storefront.get('/promotions', async (c) => {
+  const db = createDb(c.env);
+  const rows = await db`
+    SELECT id, title, subtitle, description, cta_label, target_url,
+      media_url, media_key, media_type, theme, is_active, sort_order,
+      starts_at, ends_at, created_at, updated_at
+    FROM public.storefront_promotions
+    WHERE is_active = TRUE
+      AND (starts_at IS NULL OR starts_at <= NOW())
+      AND (ends_at IS NULL OR ends_at > NOW())
+    ORDER BY sort_order ASC, created_at ASC
+  `;
+  return jsonResponse({ items: rows.map(promotionRowToApi) });
+});
+
+storefront.post('/admin/promotions/upload-signature', async (c) => {
+  const fetchImpl = typeof c.env?.FETCH_IMPL === 'function' ? c.env.FETCH_IMPL : globalThis.fetch;
+  const authorizationError = await authorizePromotionSuperAdmin(c, fetchImpl);
+  if (authorizationError) return authorizationError;
+  if (cloudinaryConfigState(c.env) !== 'ready') {
+    return errorResponse('Cloudinary storage is not configured.', 503);
+  }
+
+  const body = await readJsonBody(c);
+  const contentType = typeof body?.contentType === 'string' ? body.contentType.trim().toLowerCase() : '';
+  const resourceType = promotionContentTypes.get(contentType);
+  if (!resourceType) return errorResponse('Unsupported promotion media type.', 400);
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const publicId = globalThis.crypto.randomUUID();
+  const assetFolder = 'tager/promotions';
+  const params = { asset_folder: assetFolder, public_id: publicId, timestamp };
+  let signature;
+  try {
+    signature = await createCloudinarySignature(params, c.env.CLOUDINARY_API_SECRET);
+  } catch {
+    return errorResponse('Cloudinary signing is temporarily unavailable.', 503);
+  }
+
+  return jsonResponse(ok({
+    cloudName: c.env.CLOUDINARY_CLOUD_NAME.trim(),
+    apiKey: c.env.CLOUDINARY_API_KEY.trim(),
+    timestamp,
+    signature,
+    assetFolder,
+    publicId,
+    resourceType,
+  }));
+});
+
+storefront.post('/admin/promotions/delete-media', async (c) => {
+  const fetchImpl = typeof c.env?.FETCH_IMPL === 'function' ? c.env.FETCH_IMPL : globalThis.fetch;
+  const authorizationError = await authorizePromotionSuperAdmin(c, fetchImpl);
+  if (authorizationError) return authorizationError;
+  if (cloudinaryConfigState(c.env) !== 'ready') {
+    return errorResponse('Cloudinary storage is not configured.', 503);
+  }
+
+  const body = await readJsonBody(c);
+  const publicId = typeof body?.publicId === 'string' ? body.publicId.trim() : '';
+  const mediaType = typeof body?.mediaType === 'string' ? body.mediaType.trim().toLowerCase() : '';
+  if (!uuidPattern.test(publicId) || !['image', 'video'].includes(mediaType)) {
+    return errorResponse('Promotion media reference is invalid.', 400);
+  }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const params = { public_id: publicId, timestamp };
+  let signature;
+  try {
+    signature = await createCloudinarySignature(params, c.env.CLOUDINARY_API_SECRET);
+  } catch {
+    return errorResponse('Cloudinary signing is temporarily unavailable.', 503);
+  }
+
+  const cloudName = c.env.CLOUDINARY_CLOUD_NAME.trim();
+  const form = new URLSearchParams({
+    api_key: c.env.CLOUDINARY_API_KEY.trim(),
+    timestamp: String(timestamp),
+    public_id: publicId,
+    signature,
+  });
+  let response;
+  try {
+    response = await fetchImpl(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/${mediaType}/destroy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form,
+    });
+  } catch {
+    return errorResponse('Cloudinary media deletion is temporarily unavailable.', 503);
+  }
+
+  const result = await response.json().catch(() => null);
+  if (result?.result === 'ok' || result?.result === 'not found') {
+    return jsonResponse(ok({ deleted: true }));
+  }
+  return errorResponse('Unable to delete promotion media.', 502);
 });
 
 storefront.post('/notifications/token', async (c) => {
