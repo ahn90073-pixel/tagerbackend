@@ -5,40 +5,46 @@ export async function hashNotificationToken(token) {
   return fcmInternals.base64UrlEncode(digest);
 }
 
-export async function upsertCustomerDeviceNotificationToken(db, { token, platform, appVersion = null }) {
+export async function upsertCustomerDeviceNotificationToken(db, {
+  token, platform, appVersion = null, governorate = null,
+}) {
   const tokenHash = await hashNotificationToken(token);
   const [contact] = await db.query(
     `INSERT INTO public.notification_contacts
-      (audience, app_name, company_id, fcm_token, token_hash, platform, app_version, push_enabled, last_seen_at)
-     VALUES ('customer', 'online-store', NULL, $1, $2, $3, $4, TRUE, NOW())
+      (audience, app_name, company_id, fcm_token, token_hash, platform, app_version, governorate, push_enabled, last_seen_at)
+     VALUES ('customer', 'online-store', NULL, $1, $2, $3, $4, $5, TRUE, NOW())
      ON CONFLICT (token_hash)
        WHERE audience = 'customer' AND company_id IS NULL AND token_hash IS NOT NULL
      DO UPDATE SET fcm_token = EXCLUDED.fcm_token, platform = EXCLUDED.platform,
-                   app_version = EXCLUDED.app_version, push_enabled = TRUE,
+                   app_version = EXCLUDED.app_version,
+                   governorate = COALESCE(EXCLUDED.governorate, notification_contacts.governorate),
+                   push_enabled = TRUE,
                    last_seen_at = NOW(), updated_at = NOW()
      RETURNING id`,
-    [token, tokenHash, platform, appVersion],
+    [token, tokenHash, platform, appVersion, governorate],
   );
   return contact;
 }
 
 export async function upsertCustomerNotificationContact(db, {
-  companyId, phone, token = null, platform = null, appVersion = null, consent = false,
+  companyId, phone, token = null, platform = null, appVersion = null, governorate = null, consent = false,
 }) {
   if (consent && token) {
     const tokenHash = await hashNotificationToken(token);
     const [contact] = await db.query(
       `INSERT INTO public.notification_contacts
-        (audience, app_name, company_id, whatsapp_phone, fcm_token, token_hash, platform, app_version, push_enabled, last_seen_at)
-       VALUES ('customer', 'online-store', $1, $2, $3, $4, $5, $6, TRUE, NOW())
+        (audience, app_name, company_id, whatsapp_phone, fcm_token, token_hash, platform, app_version, governorate, push_enabled, last_seen_at)
+       VALUES ('customer', 'online-store', $1, $2, $3, $4, $5, $6, $7, TRUE, NOW())
        ON CONFLICT (audience, company_id, token_hash)
          WHERE token_hash IS NOT NULL
        DO UPDATE SET whatsapp_phone = EXCLUDED.whatsapp_phone,
                      fcm_token = EXCLUDED.fcm_token, platform = EXCLUDED.platform,
-                     app_version = EXCLUDED.app_version, push_enabled = TRUE,
+                     app_version = EXCLUDED.app_version,
+                     governorate = COALESCE(EXCLUDED.governorate, notification_contacts.governorate),
+                     push_enabled = TRUE,
                      last_seen_at = NOW(), updated_at = NOW()
        RETURNING id`,
-      [companyId, phone, token, tokenHash, platform, appVersion],
+      [companyId, phone, token, tokenHash, platform, appVersion, governorate],
     );
     return contact;
   }

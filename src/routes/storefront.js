@@ -3,6 +3,7 @@ import { createDb } from '../lib/db.js';
 import { errorResponse, jsonResponse, ok } from '../lib/response.js';
 import { tenantTable } from '../lib/tenantDb.js';
 import { normalizeEgyptPhone } from '../lib/phone.js';
+import { normalizeGovernorate } from '../lib/governorates.js';
 import { sendFcmMessage } from '../lib/fcm.js';
 import { upsertCustomerDeviceNotificationToken, upsertCustomerNotificationContact } from '../lib/notificationContacts.js';
 import { filterAndPageCatalog, readCatalogSnapshot, writeCatalogSnapshot } from '../lib/productCatalogCache.js';
@@ -19,6 +20,7 @@ const promotionContentTypes = new Map([
   ['video/mp4', 'video'],
   ['video/webm', 'video'],
 ]);
+const notificationImageContentTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 function positiveInt(value, fallback, max) {
   const parsed = Number.parseInt(value || '', 10);
@@ -105,6 +107,10 @@ export function validateCheckoutPayload(body) {
       if (typeof address[field] !== 'string' || address[field].trim().length < 2 || address[field].length > 240) {
         errors.push(`${label} مطلوب.`);
       }
+    }
+    if (typeof address.governorate === 'string' && address.governorate.trim().length >= 2
+      && !normalizeGovernorate(address.governorate)) {
+      errors.push('المحافظة غير صالحة.');
     }
     for (const field of ['district', 'building', 'apartment', 'postalCode', 'notes']) {
       if (address[field] !== undefined && (typeof address[field] !== 'string' || address[field].length > 240)) {
@@ -365,6 +371,41 @@ storefront.post('/admin/promotions/upload-signature', async (c) => {
   }));
 });
 
+storefront.post('/admin/notifications/upload-signature', async (c) => {
+  const fetchImpl = typeof c.env?.FETCH_IMPL === 'function' ? c.env.FETCH_IMPL : globalThis.fetch;
+  const authorizationError = await authorizePromotionSuperAdmin(c, fetchImpl);
+  if (authorizationError) return authorizationError;
+  if (cloudinaryConfigState(c.env) !== 'ready') {
+    return errorResponse('Cloudinary storage is not configured.', 503);
+  }
+
+  const body = await readJsonBody(c);
+  const contentType = typeof body?.contentType === 'string' ? body.contentType.trim().toLowerCase() : '';
+  if (!notificationImageContentTypes.has(contentType)) return errorResponse('Unsupported notification image type.', 400);
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const publicId = globalThis.crypto.randomUUID();
+  const assetFolder = 'tager/notifications';
+  const resourceType = 'image';
+  const params = { asset_folder: assetFolder, public_id: publicId, timestamp };
+  let signature;
+  try {
+    signature = await createCloudinarySignature(params, c.env.CLOUDINARY_API_SECRET);
+  } catch {
+    return errorResponse('Cloudinary signing is temporarily unavailable.', 503);
+  }
+
+  return jsonResponse(ok({
+    cloudName: c.env.CLOUDINARY_CLOUD_NAME.trim(),
+    apiKey: c.env.CLOUDINARY_API_KEY.trim(),
+    timestamp,
+    signature,
+    assetFolder,
+    publicId,
+    resourceType,
+  }));
+});
+
 storefront.post('/admin/promotions/delete-media', async (c) => {
   const fetchImpl = typeof c.env?.FETCH_IMPL === 'function' ? c.env.FETCH_IMPL : globalThis.fetch;
   const authorizationError = await authorizePromotionSuperAdmin(c, fetchImpl);
@@ -419,14 +460,18 @@ storefront.post('/notifications/token', async (c) => {
   const token = typeof body?.token === 'string' ? body.token.trim() : '';
   const platform = body?.platform;
   const appVersion = body?.appVersion;
+  const governorateProvided = body?.governorate !== undefined && body?.governorate !== null
+    && !(typeof body.governorate === 'string' && body.governorate.trim() === '');
+  const governorate = governorateProvided ? normalizeGovernorate(body.governorate) : null;
   if (!token || token.length > 4096) return errorResponse('رمز الإشعارات غير صالح.', 400);
   if (!['android', 'ios', 'web'].includes(platform)) return errorResponse('منصة الإشعارات غير صالحة.', 400);
   if (appVersion !== undefined && (typeof appVersion !== 'string' || appVersion.trim().length > 64)) {
     return errorResponse('إصدار التطبيق غير صالح.', 400);
   }
+  if (governorateProvided && !governorate) return errorResponse('المحافظة غير صالحة.', 400);
   const db = createDb(c.env);
   const contact = await upsertCustomerDeviceNotificationToken(db, {
-    token, platform, appVersion: appVersion?.trim() || null,
+    token, platform, appVersion: appVersion?.trim() || null, governorate,
   });
   return jsonResponse(ok({ registered: Boolean(contact?.id) }, 'تم حفظ توكن الإشعارات.'));
 });
@@ -439,6 +484,7 @@ storefront.post('/checkout', async (c) => {
   const normalizedBody = {
     ...body,
     customer: { ...body.customer, phone: normalizeEgyptPhone(body.customer.phone) },
+    address: { ...body.address, governorate: normalizeGovernorate(body.address.governorate) },
   };
 
   try {
@@ -468,6 +514,12 @@ async function saveCustomerContacts(db, orders, payload) {
   const token = payload.notificationConsent === true ? payload.fcmToken.trim() : null;
   const platform = token ? payload.platform : null;
   const appVersion = token ? (payload.appVersion?.trim() || null) : null;
+  const governorate = token ? normalizeGovernorate(payload.address.governorate) : null;
+  if (token) {
+    await upsertCustomerDeviceNotificationToken(db, { token, platform, appVersion, governorate }).catch(() => {
+      console.warn('The central customer notification contact could not be updated.');
+    });
+  }
   for (const order of orders) {
     try {
       await upsertCustomerNotificationContact(db, {
@@ -476,6 +528,7 @@ async function saveCustomerContacts(db, orders, payload) {
         token,
         platform,
         appVersion,
+        governorate,
         consent: payload.notificationConsent === true,
       });
     } catch {
